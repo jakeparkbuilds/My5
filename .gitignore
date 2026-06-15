@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+venv/
+.venv/
+env/
+.env
+*.env
+
+# uv
+.python-version
+
+# Data — never commit raw or processed play-by-play
+data/
+
+# AWS credentials — never commit these
+.aws/
+*.pem
+*.p12
+credentials
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
