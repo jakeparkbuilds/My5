@@ -75,3 +75,17 @@ Append a dated entry for every non-obvious choice. This is interview prep — ke
 **Finding:** `espn_nba_game_rosters()` returns an `active` boolean that reflects contract/eligibility status, not "dressed tonight." In the CHI@PHI game, 10 of the 11 players marked `active=False` actually appeared in substitution events (Patrick Beverley, Terry Taylor, Danuel House Jr., Jaden Springer, Marcus Morris Sr., and others on hardship exceptions or two-way deals). Only one `active=False` player (Torrey Craig) was a genuine DNP, and he also had `did_not_play=True`.
 
 **Choice:** build the player→team map by filtering on `did_not_play=False` only, ignoring `active`. This is the only flag in the roster that reliably identifies a player who never entered the game.
+
+---
+
+## 2026-06-15 — PBP loader must use infer_schema_length=None
+
+**Root cause:** `pl.from_dicts()` infers column types from only the first N rows (polars default ~100). This is an inference window problem, not specific to any event type. If a field is null in the first ~100 rows but populated by a rare event later in the file, polars types it as `Null`, then raises a schema conflict when the real value appears.
+
+**Trigger found:** `participants.2.athlete.id` — populated only on jump-ball events where a third participant is named (the player who gains possession). In SAS@MEM (game 401585088), the first such jump ball was at row 167, past the inference window; polars had already committed the column type as `Null`.
+
+**Affected fields (across 52 games):** scanning all cached PBP parquets, `participants.2.athlete.id` is the only field that exhibits late-population. No other field (coordinate, score, clock, team ID) was null in the first 100 rows but populated later.
+
+**Fix:** `pl.from_dicts(plays_dicts, infer_schema_length=None)` — forces polars to scan all rows before committing the schema. This is now centralised in `src/my5/loader.py:load_pbp()`. Both scripts that previously called `pl.from_dicts()` directly now go through `load_pbp()`. The fix was verified by re-running the full 52-game batch: **52/52 loaded and reconstructed without crashing** (previously 51/52).
+
+**Open question for aggregation:** when `lineup_valid=False` is set because of the post-sub attribution pattern (gpn=180, gpn=195 — event credited to a player who was subbed out within the same clock-second), should aggregation exclude just that single row, or the entire stint containing that row? The single-row exclusion is more permissive and loses almost nothing; the stint exclusion is conservative but discards valid surrounding events. Decide before building the aggregator.
