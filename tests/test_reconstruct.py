@@ -155,7 +155,7 @@ def test_participant_in_lineup_passes_invariant2():
 def test_sub_player_out_not_in_lineup_flags_invalid():
     """
     Constructed case: sub references a player_out who is not in the lineup.
-    The row should be flagged lineup_valid=False and the function must not crash.
+    The row should be flagged lineup_valid=False and violation_type="inv1_count".
     """
     ghost_player_out = 9999999  # not in any lineup
 
@@ -171,12 +171,16 @@ def test_sub_player_out_not_in_lineup_flags_invalid():
     assert sub_row["lineup_valid"] is False, (
         "Sub with unknown player_out must set lineup_valid=False"
     )
+    assert sub_row["violation_type"] == "inv1_count", (
+        "Sub with unknown player_out must set violation_type='inv1_count'"
+    )
 
 
 def test_invariant2_flags_participant_not_in_lineup():
     """
     Constructed case: a non-sub event attributes an action to a player who,
-    per our reconstructed state, is not in the lineup. Must flag lineup_valid=False.
+    per our reconstructed state, is not in the lineup. Must flag lineup_valid=False
+    and violation_type="inv2_participant".
     """
     ghost_participant = 9999999  # not in any lineup
     # Add ghost to the player_team map by injecting into roster
@@ -191,6 +195,18 @@ def test_invariant2_flags_participant_not_in_lineup():
     assert row["lineup_valid"] is False, (
         "Event with participant not in lineup must set lineup_valid=False"
     )
+    assert row["violation_type"] == "inv2_participant", (
+        "Event with participant not in lineup must set violation_type='inv2_participant'"
+    )
+
+
+def test_clean_row_has_null_violation_type():
+    """Clean rows must have violation_type=None (not a stale string)."""
+    rows = [_make_event_row(1, "Jump Shot", HOME_ID, p0=HOME_STARTERS[0])]
+    result = _run(rows)
+    row = result.row(0, named=True)
+    assert row["lineup_valid"] is True
+    assert row["violation_type"] is None
 
 
 def test_multiple_subs_same_team_apply_sequentially():

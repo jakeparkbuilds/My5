@@ -88,4 +88,128 @@ Append a dated entry for every non-obvious choice. This is interview prep — ke
 
 **Fix:** `pl.from_dicts(plays_dicts, infer_schema_length=None)` — forces polars to scan all rows before committing the schema. This is now centralised in `src/my5/loader.py:load_pbp()`. Both scripts that previously called `pl.from_dicts()` directly now go through `load_pbp()`. The fix was verified by re-running the full 52-game batch: **52/52 loaded and reconstructed without crashing** (previously 51/52).
 
-**Open question for aggregation:** when `lineup_valid=False` is set because of the post-sub attribution pattern (gpn=180, gpn=195 — event credited to a player who was subbed out within the same clock-second), should aggregation exclude just that single row, or the entire stint containing that row? The single-row exclusion is more permissive and loses almost nothing; the stint exclusion is conservative but discards valid surrounding events. Decide before building the aggregator.
+**Open question RESOLVED (2026-06-15):** See "inv1/inv2 exclusion scopes" entry below.
+---
+
+## 2026-06-15 — Invariant exclusion scopes: inv1 → stint, inv2 → row
+
+**Choice:** `violation_type` column on every PBP row (`None` / `"inv1_count"` / `"inv2_participant"`). Aggregation applies:
+- **inv1_count** → exclude the entire stint containing the violating row, AND any subsequent stints whose lineup has ≠ 5 players (corrupted by the ghost-add recovery in `_apply_sub`).
+- **inv2_participant** → drop only the flagged row; the rest of the stint is kept.
+
+**Why the asymmetry:** Invariant 1 fires when a sub references a `player_out` who was never in our tracked lineup — meaning our lineup state was wrong *before* the sub. Every event in that stint is measured against a bad lineup, so the whole stint's metrics are unreliable. Invariant 2 fires on a single event attribution mismatch (the count is still 5) — the lineup itself is sound, only one event is dirty.
+
+**Real-game cases (52 games):** 2 flags total — both are inv2. CHI@PHI gpn=180: kicked ball turnover credited to Terry Taylor who had just subbed out. POR@DAL gpn=195: technical foul credited to Grant Williams who was not in the reconstructed home lineup. Both are ESPN data artifacts; the surrounding events are clean.
+
+---
+
+## 2026-06-15 — Possession counting: event-walking rule-set
+
+**Choice:** Walk play-by-play events in `game_play_number` order and detect possession-end transitions directly. Count one possession for the **team that just lost the ball** at:
+
+| Event | Condition | Possession ends for |
+|---|---|---|
+| Made FG (not and-one) | `scoringPlay=True`, `scoreValue ∈ {2,3}`, `_is_and_one_fg=False` | `team.id` |
+| And-one FT completion | `type.text == "Free Throw - 1 of 1"`, `_is_and_one_ft=True` | `team.id` |
+| Made final FT (non-and-one) | `"Free Throw" in type.text`, `"Technical" not in`, final position (N of N), `scoringPlay=True`, `_is_and_one_ft=False` | `team.id` |
+| Defensive Rebound | `type.text == "Defensive Rebound"` | the team that is **not** `team.id` |
+| Turnover | `"Turnover" in type.text` | `team.id` |
+
+Not possession ends: missed FGs (let DREB handle), missed FTs (let DREB handle — counting both would double-count), Technical FTs, OREBs, fouls, substitutions, period boundaries.
+
+**Why missed FTs are not possession-ends:** A missed final FT always leads to a live rebound. If we counted both the missed FT AND the subsequent DREB, the possession would be counted twice. The DREB rule already captures the possession end cleanly.
+
+---
+
+## 2026-06-15 — And-one pairing: semantic player+team+clock key (no row window)
+
+**Choice:** An and-one is identified by scanning forward from a made FG and finding `type.text == "Free Throw - 1 of 1"` where `participants.0.athlete.id`, `team.id`, AND `clock.displayValue` all match the made FG. No fixed row-distance window.
+
+**Why not a row-window heuristic ("scan next 3 rows"):** The row distance between the made FG and its and-one FT ranges from 2 to 8 in our 52-game corpus (249 and-ones found). A 3-row window would miss 14.4% of and-ones (all those at dist ≥ 4). Wider windows (e.g., 15 rows) work but need a stopping condition or risk false positives.
+
+**Why not the foul-bridge approach:** Checking for an intermediate Shooting Foul event found 0/249 pairings. ESPN either omits the foul row entirely between the FG and FT, or `participants.1` on the foul row doesn't consistently identify the fouled player.
+
+**Coverage:** player+team+clock key paired 249/249 and-ones (100%), zero ambiguous cases.
+
+**Implementation:** scan up to 15 rows forward. Break immediately when the matching FT-1-of-1 is found. The 15-row bound is a safety cap; the true empirical maximum is 8 rows.
+
+---
+
+## 2026-06-15 — Usage rate definition: (FGA + TOV + FT_trips) / team_poss_on_floor
+
+**Choice:** A player's usage is `(FGA + TOV + FT_trips) / team_poss_on_floor`, where `FT_trips` = count of non-and-one FT trip starts (`"1 of" in type.text`, `"Free Throw" in type.text`, `"Technical" not in type.text`, not `_is_and_one_ft`), attributed to `participants.0.athlete.id`.
+
+**Why FGA+TOV is insufficient:** A shooting foul on a missed shot sends the player to the line without producing a FGA event. That consumption of a team possession is invisible to FGA+TOV. For top foul-drawers (Embiid, Giannis, Banchero) the gap reaches 17–27% — a material undercount that would systematically underweight their role in the possession model.
+
+**FT_trip attribution:** The FT shooter (`participants.0` on the first FT of each trip) is credited. Technical FTs are excluded because the tech foul is attributed to the committing player (their possession context), not the FT shooter.
+
+**And-one FTs excluded from FT_trips:** The player already consumed a possession via the FGA. The and-one FT is a bonus attempt within the same possession, not a separate usage event.
+
+**Lone Free Throw - 1 of 1 (non-and-one):** These (12 in 52 games — typically flagrant or clear-path scenarios) DO count as FT trips. The `_is_and_one_ft` flag distinguishes them from and-one FTs.
+
+---
+
+## 2026-06-15 — Rim classification: event type-name primary, keywords {Layup, Dunk, Tip, Finger Roll}
+
+**Choice:** A 2PT FGA is classified "rim" if `type.text` contains any of `Layup`, `Dunk`, `Tip`, or `Finger Roll`. All other 2PT FGAs are "mid-range." 3PT FGAs are "three" (ESP encodes this via `pointsAttempted == 3`; no coordinate needed).
+
+**Why type-name over coordinate cutoff:** Coordinate `y ≤ 7` clips 15 legitimate rim-area shots (ESPN-labeled "8-foot driving layup", "11-foot layup", "finger roll layup") into the mid bucket. These are genuine near-rim attempts. The type-name rule captures all of them.
+
+**Sentinel coordinates on FTs:** `coordinate = −214748340` appears only on `pointsAttempted == 1` rows (FTs). All FGAs have valid coordinates. Coordinates are safe to use as a supplementary filter for ambiguous cases.
+
+**RESOLVED (2026-06-15) — Hook shots added to rim; floaters stay mid.**
+
+Coordinate analysis across 52 games:
+- `Hook Shot`, `Turnaround Hook Shot`, `Driving Hook Shot`: 88% at y≤7, median y=4–6 → **rim** (keyword: "Hook")
+- `Driving Floating Bank Jump Shot`: 95% at y≤7, median y=4 → **rim** (keyword: "Hook" does not match; "Floating Bank" is a separate keyword added)
+- `Driving Floating Jump Shot`, `Floating Jump Shot`: 47–62% at y≤7, median y=7–8 → **mid** (borderline, but floaters are conventionally mid-range by analytics convention)
+
+**Final `_RIM_KEYWORDS`:** `{Layup, Dunk, Tip, Finger Roll, Hook}`. All hook-variant type names contain "Hook"; the "Floating Bank" variants also contain "Hook" via no match — wait, they do NOT. On re-inspection: `Driving Floating Bank Jump Shot` does not contain "Hook". Its 95% rim rate makes it borderline for reclassification, but it affects ~40 shots in 52 games and is not matched by any current keyword. **Left as mid for now; flag for revisit at full-season scale if mid FG% remains elevated above 0.42.**
+
+Adding "Hook" moves ~90 hook shots from mid→rim. Effect on league-average mid FG%: drops from 0.445 toward 0.38–0.42 (verified by rerun — see run log).
+
+---
+
+## 2026-06-15 — inv1_count silent-corruption bug: the most important correctness fix in P1
+
+**The bug:** `_accumulate_game` correctly excluded stints whose rows carried `violation_type == "inv1_count"`. But the exclusion was keyed on the *flag*, not on the *lineup corruption*. When a dirty sub fires, `_apply_sub` marks the sub row `inv1_count` and adds `player_in` without removing anyone, leaving the lineup with 6 players. That sub row goes into stint N (the pre-sub lineup), which was correctly excluded. The subsequent events go into stint N+1, keyed by the 6-player lineup — and stint N+1 carries **no** `inv1_count` flag. It passed through the filter entirely.
+
+**Why it was invisible:** Across our 52-game corpus there are zero inv1 violations (only 2 flags total, both inv2). The bug would only manifest if an inv1 violation was present. At full-season scale (1,230 games), there are likely dozens; each would silently contaminate the downstream stint with a phantom 6th player in the lineup key, producing lineup metrics attributed to an impossible 6-person unit.
+
+**How it was caught:** A synthetic unit test (`test_inv1_stint_fully_excluded`) constructed a fake game with a deliberate inv1 sub, then verified the following FG produced zero possessions. It failed — the FG in the 6-player stint was counted — revealing the gap.
+
+**The fix:** Added a lineup-size guard in `_accumulate_game`:
+```python
+if len(home_lineup_set) != 5 or len(away_lineup_set) != 5:
+    corrupted_stints.append({...})
+    continue
+```
+This catches every subsequent stint that inherits the ghost-add corruption, regardless of whether it carries an inv1 flag.
+
+**Why the guard also reports:** Made silent. The count `len(corrupted_stints)` is printed in the run summary. At 52 clean games this is 0. At full season scale, a non-zero count is a data-quality signal that must be investigated before results are trusted. The skip was previously completely silent — a `continue` with no log — which meant we could silently lose hundreds of possessions at scale with no indication anything was wrong.
+
+---
+
+## 2026-06-15 — OREB rate: player_ORs / team missed FGA and missed final FT while on floor
+
+**Choice:** `oreb_rate = player_offensive_rebounds / team_missed_shot_opportunities_while_on_floor`
+
+Denominator counts each missed FGA (`shootingPlay=True, scoringPlay=False, pointsAttempted ∈ {2,3}`) and each missed final FT (`_is_final_ft=True, scoringPlay=False, "Technical" not in type.text`) by the player's team while the player is in the reconstructed lineup. All 5 on-floor offensive players get +1 opportunity per miss.
+
+**Why not OREB / team possessions:** Possessions conflate rebounding skill with how often a team shoots (high-usage possessions inflate the denominator). The correct denominator is opportunities — misses that create a live rebound.
+
+**Sanity check:** 1,090 total player OREB credits across 52 games = 5 × ~218 actual team OREBs. The 5× inflation from crediting all 5 on-floor players cancels in the ratio and is correct.
+
+**Observed range (321 players, ≥20 opportunities):** 0% – 22%, median 3.2%. Team OREB% ≈ individual × 5 ≈ 16%, consistent with starters seeing more opportunity-per-player than the whole roster average.
+
+**Validation note (SUSPECTED, not confirmed):** Observed team OREB% (~16%) is below the NBA typical range of 25–28%. Suspected cause: our denominator may undercount live-rebound opportunities in edge cases (e.g., jump balls after a shot-clock reset, certain flagrant-foul FT sequences where the ball is live). Not confirmed — revisit at full-season scale with a direct count of ESPN-logged OREBs against our denominator totals.
+
+---
+
+## 2026-06-15 — Validation notes: OREB% low, 3P% slightly high (SUSPECTED causes only)
+
+These are observations from the 52-game validation run. Root causes are not confirmed; do not treat these as definitive diagnoses.
+
+**3P% at 0.379 (NBA typical 0.35–0.37):** SUSPECTED to reflect sample composition — 52 hand-selected games may skew toward high-3P% teams or game-states. The 52-game slice is not a random sample of the season. Revisit at full-season scale.
+
+**Mid FG% at ~0.41 after Hook reclassification (down from 0.445):** Still slightly above NBA mid-range of 0.38–0.42. SUSPECTED residual cause: `Driving Floating Bank Jump Shot` and other near-rim shots without a keyword match (~40 shots in 52 games) remain in the mid bucket. Not reclassified yet — too few shots for a firm decision. Revisit at full-season scale.

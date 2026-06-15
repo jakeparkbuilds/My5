@@ -2,15 +2,19 @@
 Lineup reconstruction from ESPN play-by-play.
 
 Takes a sorted PBP DataFrame and a game-roster DataFrame (from espn_nba_game_rosters)
-and returns the PBP with three new columns attached:
+and returns the PBP with four new columns attached:
 
-  home_lineup   list[int]  — sorted list of 5 home athlete IDs on the floor at event start
-  away_lineup   list[int]  — sorted list of 5 away athlete IDs on the floor at event start
-  lineup_valid  bool       — False if either invariant was violated for this row
+  home_lineup     list[int]   — sorted list of 5 home athlete IDs on the floor at event start
+  away_lineup     list[int]   — sorted list of 5 away athlete IDs on the floor at event start
+  lineup_valid    bool        — False if either invariant was violated for this row
+  violation_type  str | None  — "inv1_count", "inv2_participant", or None (clean)
 
 Invariant 1 (count): each team's lineup must have exactly 5 players after every sub.
+  Violation scope: entire stint containing the violating row is excluded from aggregation.
+
 Invariant 2 (participant): for non-sub events, the acting team's participant(s) must be
-members of that team's reconstructed lineup at that moment.
+  members of that team's reconstructed lineup at that moment.
+  Violation scope: only the violating row is excluded; the rest of the stint is kept.
 
 On any violation, we flag the row and log it — we never fabricate a removal or guess.
 """
@@ -51,6 +55,7 @@ def reconstruct_lineups(
     home_lineups: list[list[int]] = []
     away_lineups: list[list[int]] = []
     valid_flags: list[bool] = []
+    violation_types: list[str | None] = []
 
     home: set[int] = set(home_starters)
     away: set[int] = set(away_starters)
@@ -67,22 +72,25 @@ def reconstruct_lineups(
             home_lineups.append(sorted(home))
             away_lineups.append(sorted(away))
 
-            valid = _apply_sub(row, home, away, player_team, home_team_id, away_team_id, gpn)
+            valid, vtype = _apply_sub(row, home, away, player_team, home_team_id, away_team_id, gpn)
             valid_flags.append(valid)
+            violation_types.append(vtype)
         else:
             # Stamp current lineup (pre-event)
             home_lineups.append(sorted(home))
             away_lineups.append(sorted(away))
 
-            valid = _check_participant_invariant(
+            valid, vtype = _check_participant_invariant(
                 row, home, away, player_team, home_team_id, away_team_id, gpn
             )
             valid_flags.append(valid)
+            violation_types.append(vtype)
 
     return plays.with_columns(
         pl.Series("home_lineup", home_lineups, dtype=pl.List(pl.Int64)),
         pl.Series("away_lineup", away_lineups, dtype=pl.List(pl.Int64)),
         pl.Series("lineup_valid", valid_flags, dtype=pl.Boolean),
+        pl.Series("violation_type", violation_types, dtype=pl.String),
     )
 
 
@@ -167,8 +175,8 @@ def _apply_sub(
     home_team_id: int,
     away_team_id: int,
     gpn: int,
-) -> bool:
-    """Apply one substitution to the mutable lineup sets. Returns lineup_valid."""
+) -> tuple[bool, str | None]:
+    """Apply one substitution to the mutable lineup sets. Returns (lineup_valid, violation_type)."""
     raw_in = row.get("participants.0.athlete.id")
     raw_out = row.get("participants.1.athlete.id")
 
@@ -176,7 +184,7 @@ def _apply_sub(
         logger.warning(
             "gpn=%d: substitution row missing participant IDs — skipping", gpn
         )
-        return False
+        return False, "inv1_count"
 
     player_in = int(raw_in)
     player_out = int(raw_out)
@@ -187,7 +195,7 @@ def _apply_sub(
             "gpn=%d: player_in=%d not in roster player_team map — cannot route sub",
             gpn, player_in,
         )
-        return False
+        return False, "inv1_count"
 
     lineup = home if team_id == home_team_id else away
     label = "home" if team_id == home_team_id else "away"
@@ -216,7 +224,7 @@ def _apply_sub(
         )
         valid = False
 
-    return valid
+    return valid, (None if valid else "inv1_count")
 
 
 def _check_participant_invariant(
@@ -227,16 +235,18 @@ def _check_participant_invariant(
     home_team_id: int,
     away_team_id: int,
     gpn: int,
-) -> bool:
-    """Invariant 2: acting team's participant(s) must be in that team's lineup."""
+) -> tuple[bool, str | None]:
+    """Invariant 2: acting team's participant(s) must be in that team's lineup.
+
+    Returns (lineup_valid, violation_type).
+    """
     event_type = row.get("type.text") or ""
     if event_type in _END_TYPES:
-        # Boundary markers have no participant; skip check
-        return True
+        return True, None
 
     acting_team_raw = row.get("team.id")
     if acting_team_raw is None:
-        return True  # no team attribution (e.g. jump ball handled separately)
+        return True, None
 
     acting_team = int(acting_team_raw)
     lineup = home if acting_team == home_team_id else away
@@ -261,4 +271,4 @@ def _check_participant_invariant(
             )
             valid = False
 
-    return valid
+    return valid, (None if valid else "inv2_participant")
