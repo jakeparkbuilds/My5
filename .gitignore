@@ -24,6 +24,15 @@ env/
 # Data — never commit raw or processed play-by-play
 data/
 
+# Terraform — state files contain resource IDs/secrets, provider cache is large
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+crash.*.log
+# .terraform.lock.hcl IS committed — it pins provider versions like requirements.lock
+
 # AWS credentials — never commit these
 .aws/
 *.pem
