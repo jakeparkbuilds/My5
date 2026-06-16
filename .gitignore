@@ -13,6 +13,7 @@ build/
 # Environments
 venv/
 .venv/
+.venv-*/
 env/
 .env
 *.env
