@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Basketball lineup simulation sandbox"
 requires-python = ">=3.11"
 dependencies = [
+    "boto3>=1.43.30",
     "polars>=1.30.0",
     "sportsdataverse>=0.0.59",
 ]

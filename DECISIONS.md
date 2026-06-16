@@ -213,3 +213,81 @@ These are observations from the 52-game validation run. Root causes are not conf
 **3P% at 0.379 (NBA typical 0.35–0.37):** SUSPECTED to reflect sample composition — 52 hand-selected games may skew toward high-3P% teams or game-states. The 52-game slice is not a random sample of the season. Revisit at full-season scale.
 
 **Mid FG% at ~0.41 after Hook reclassification (down from 0.445):** Still slightly above NBA mid-range of 0.38–0.42. SUSPECTED residual cause: `Driving Floating Bank Jump Shot` and other near-rim shots without a keyword match (~40 shots in 52 games) remain in the mid bucket. Not reclassified yet — too few shots for a firm decision. Revisit at full-season scale.
+
+---
+
+## 2026-06-16 — Local DynamoDB emulation: amazon/dynamodb-local (not LocalStack)
+
+**Choice:** `amazon/dynamodb-local` Docker image (`amazon/dynamodb-local:latest`, port 8000) for local development instead of LocalStack.
+
+**Why not LocalStack:** LocalStack ≥2026.x merged community and Pro into one image (same digest: `ade907629584`). The community DynamoDB feature now requires an account registration even for local offline use. The `LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1` grace-period flag was removed. The container starts and immediately exits with an auth error.
+
+**Why amazon/dynamodb-local:** AWS publishes their own official DynamoDB emulator as a Docker image. It is free, requires no account, is maintained by AWS (not a third party), and implements the full DynamoDB API — boto3 and the AWS CLI point at it identically, just with `--endpoint-url http://localhost:8000`. It is used by AWS's own SDK test suites. It covers everything this phase needs.
+
+**Future phases:** If we need local emulation of S3, SQS, or Lambda (P2+), we'll revisit LocalStack (sign up for a free account) or per-service alternatives then. Don't adopt a heavier tool before it's needed.
+
+**Run the emulator:**
+```bash
+docker run --rm -d -p 8000:8000 --name dynamodb-local amazon/dynamodb-local
+# Stop it:
+docker stop dynamodb-local
+```
+
+---
+
+## 2026-06-16 — Dual-target Terraform: one codebase, local vs. real AWS via a variable
+
+**Choice:** A single `infra/main.tf` with a boolean variable `use_local` (default `true`). When `true`, the AWS provider is configured with `endpoints { dynamodb = "http://localhost:8000" }`, dummy credentials (`access_key = "test"`, `secret_key = "test"`), and `skip_*` flags that suppress validation calls DynamoDB Local can't answer. When `false`, the provider is a standard AWS provider (reads credentials from the normal chain).
+
+**Why one file instead of two (dev.tf / prod.tf):** Two files immediately diverge. Schema changes, billing-mode changes, and tag changes must then be applied in two places, and they will drift. One file with a variable guarantees the local and real-AWS environments are identical by construction.
+
+**Why a Terraform variable (not a backend / workspace):** This is a simple endpoint switch, not a different environment with different state. Terraform workspaces are for parallel environments (staging vs prod) that need separate state files. A variable is the right abstraction for "same resources, different target."
+
+**The `skip_*` flags explained:**
+- `skip_credentials_validation` — DynamoDB Local doesn't implement the STS credential validation endpoint.
+- `skip_requesting_account_id` — DynamoDB Local returns a fake account ID (`000000000000`); requesting the real one would fail.
+- `skip_metadata_api_check` — DynamoDB Local has no EC2 instance metadata service.
+All three are no-ops for real AWS and required for DynamoDB Local.
+
+**Deploy to real AWS (future):**
+```bash
+terraform -chdir=infra apply -var="use_local=false"
+```
+No code change needed.
+
+---
+
+## 2026-06-16 — float→Decimal(str(x)) conversion and NaN-omission rule for DynamoDB
+
+**The boto3 float rejection:** boto3 raises `TypeError: Float types are not supported. Use Decimal types instead.` if any Number attribute is a Python `float`. This is not a boto3 bug — DynamoDB's number type is an arbitrary-precision decimal, not IEEE 754. boto3 enforces this at the serialization layer.
+
+**Why `Decimal(str(x))` and NOT `Decimal(x)`:**
+- `Decimal(0.1)` produces `Decimal('0.1000000000000000055511151231257827021181583404541015625')` because the float `0.1` is already imprecise in binary. Every float carries this noise.
+- `Decimal(str(0.1))` produces `Decimal('0.1')` — exactly 0.1. `str()` rounds to the float's display precision, which for `round(x, 4)` outputs are clean (e.g. `str(round(0.3952, 4)) == '0.3952'`).
+- Our aggregation always calls `round()` before storing rates (1–4 decimal places), so `str()` is lossless for all values in the DataFrame.
+
+**The NaN-omission rule:** DynamoDB rejects `NaN` as a Number value (it is not a valid JSON number). Any attribute whose computed value is `float('nan')` or `None` is **omitted** from the DynamoDB item entirely. A missing attribute is unambiguous; a NaN attribute would silently corrupt the simulator's probability lookup. In practice our aggregation returns `0.0` for zero-denominator rates (via `_safe(n, d)`), so NaN values should never appear — but the guard is always-on for safety.
+
+**Zero is NOT omitted:** `Decimal('0')` and `Decimal('0.0')` are valid and written. Only `None` and `float('nan')` are omitted.
+
+**Idempotency:** `PutItem` overwrites any existing item with the same PK. Re-running `load_dynamo.py` rewrites all 1,819 lineup items and 405 player items cleanly — no duplicates, no stale data.
+
+**Round-trip confirmed (2026-06-16):** PHI starters lineup: off=126.9, def=113.0, net=+13.9. Embiid usage_rate=0.3952. All values read back from DynamoDB Local match the aggregation source exactly.
+
+---
+
+## 2026-06-16 — lineup_key as DynamoDB PK: canonical form "{team_id}#{sorted_ids}"
+
+**Choice:** The DynamoDB partition key for `my5-lineup-metrics` is a string:
+```
+"{team_id}#{athlete_id_0}#{athlete_id_1}#{athlete_id_2}#{athlete_id_3}#{athlete_id_4}"
+```
+where the 5 athlete IDs are sorted **numerically** (not lexicographically).
+
+**Why sort numerically, not lexicographically:** IDs like `[3416, 6440, 3059318]` sort numerically to `[3416, 6440, 3059318]` but lexicographically to `[3059318, 3416, 6440]` (because '3' < '6' as a string). An incorrect lex sort would produce different keys for the same lineup depending on how the IDs happen to be ordered in the input, breaking the idempotency of the key construction. Python's `sorted()` on integers is numeric by default; we explicitly cast to `int` before sorting.
+
+**Why not a hash or UUID:** A deterministic string key can be reconstructed from any representation of the lineup without a lookup table. The simulator, the API, and any ETL job can independently compute the same key from a list of 5 IDs. A hash is opaque and can collide; a UUID requires a registry.
+
+**Why team_id is in the key:** The same 5 players could theoretically appear as a lineup on different teams (trades, All-Star rosters, hypothetical matchups). Including team_id keeps the key correct for our actual use case (same lineup on different teams has different metrics) and aligns with the simulator's lookup pattern (`get_lineup_metrics(team_id, five_athlete_ids)`).
+
+**Stability guarantee:** `reconstruct.py` stores `home_lineup` and `away_lineup` as sorted lists (the `sorted()` call is explicit in the reconstruction step). The aggregation accumulator keys on `tuple(sorted_lineup)`. The DynamoDB key adds `team_id` and re-sorts defensively. Any permutation of the same 5 IDs → identical key. Verified by tests `test_lineup_key_order_independent` and `test_lineup_key_numeric_sort_not_lexicographic`.
