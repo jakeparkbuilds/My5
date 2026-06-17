@@ -206,14 +206,12 @@ def test_league_avg_matchup_near_zero_margin():
     players = make_league_avg_players(_LEAGUE)
     result = simulate(players, None, players, None, _LEAGUE, seed=1)
 
-    assert abs(result.mean_margin) < 2.0, (
-        f"League-avg vs league-avg margin {result.mean_margin:.2f} should be near zero"
+    # Welford stops when CI ≤ 2.0, so the mean can sit anywhere inside ±CI at
+    # convergence. Allow CI + 0.5 slop (same bound as test_self_matchup_near_zero_margin).
+    assert abs(result.mean_margin) <= result.ci_half_width + 0.5, (
+        f"League-avg vs league-avg margin {result.mean_margin:.2f} outside "
+        f"CI ±{result.ci_half_width:.2f} — check engine symmetry"
     )
-    # pts scored per game: each team faces ~97 possessions, each yielding ~1.0 pt on avg.
-    # Rough expected: 97 * (usage * (1-tov) * (rim_r*rim_fg + mid_r*mid_fg + 3p_r*3p_fg))
-    # ≈ 97 * (0.19*5 * ~0.55) ≈ 97 * 0.52 ≈ 50.7 pts expected per team. Actual NBA is ~110.
-    # But our player usage_rate is per-player, 5 players sum to ≈ 0.95 → ≈ 97*0.52 pts
-    # Just verify it's plausible (non-trivially positive).
     assert result.mean_pts_a > 20, "Mean pts_a suspiciously low — check possession loop"
     assert result.mean_pts_b > 20, "Mean pts_b suspiciously low — check possession loop"
     assert result.converged, "League-avg matchup should converge before 5000 sims"

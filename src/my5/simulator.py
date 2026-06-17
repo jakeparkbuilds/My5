@@ -303,11 +303,15 @@ def _simulate_game(
     """
     Simulate one game. Returns (score_a, score_b).
 
-    Each team gets Poisson(_POSS_PER_SIDE) possessions (independent draws),
-    capturing game-to-game pace variation without inflating the CI calculation.
+    Pace is coupled: one Poisson(2 × _POSS_PER_SIDE) draw sets total game tempo,
+    then split evenly between the two teams. Both teams play in the same game, so
+    their possession counts cannot diverge independently — independent draws
+    would allow impossible splits (e.g. 80 vs 114) and inflate margin variance by
+    ~43% relative to coupled pace. (See DECISIONS.md 2026-06-17.)
     """
-    poss_a = int(rng.poisson(_POSS_PER_SIDE))
-    poss_b = int(rng.poisson(_POSS_PER_SIDE))
+    total_poss = int(rng.poisson(_POSS_PER_SIDE * 2))
+    poss_a = total_poss // 2
+    poss_b = total_poss - poss_a
     score_a = sum(_simulate_possession(rng, team_a, defense_vs_a, lg) for _ in range(poss_a))
     score_b = sum(_simulate_possession(rng, team_b, defense_vs_b, lg) for _ in range(poss_b))
     return score_a, score_b
