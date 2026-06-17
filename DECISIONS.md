@@ -291,3 +291,101 @@ where the 5 athlete IDs are sorted **numerically** (not lexicographically).
 **Why team_id is in the key:** The same 5 players could theoretically appear as a lineup on different teams (trades, All-Star rosters, hypothetical matchups). Including team_id keeps the key correct for our actual use case (same lineup on different teams has different metrics) and aligns with the simulator's lookup pattern (`get_lineup_metrics(team_id, five_athlete_ids)`).
 
 **Stability guarantee:** `reconstruct.py` stores `home_lineup` and `away_lineup` as sorted lists (the `sorted()` call is explicit in the reconstruction step). The aggregation accumulator keys on `tuple(sorted_lineup)`. The DynamoDB key adds `team_id` and re-sorts defensively. Any permutation of the same 5 IDs → identical key. Verified by tests `test_lineup_key_order_independent` and `test_lineup_key_numeric_sort_not_lexicographic`.
+
+---
+
+## 2026-06-16 — Defensive lineup rates: apply empirical Bayes shrinkage at engine time (same constants as player params)
+
+**Problem:** Per-lineup defensive rates (`opp_rim_fg_pct`, `opp_mid_fg_pct`, `opp_3p_fg_pct`, `forced_to_rate`, `dreb_rate`) are raw aggregates with no shrinkage. A small-sample lineup's rates are wildly noisy — the worked example exposed this: team_id=27's starting lineup allowed 31/57 three-pointers over 5 games (54.4% 3P-allowed, vs 37.95% league average). Without treatment, log5 inflates a below-average 3P shooter's make probability from 30.8% to 46.5%, and nothing flags it because simulated games have no ground truth to check against.
+
+**Fix:** Apply the same empirical Bayes shrinkage to all five defensive rates **at engine read time** using the raw counts already stored in `my5-lineup-metrics`:
+
+```
+shrunk_rate = (n × observed + prior_n × lg) / (n + prior_n)
+```
+
+| Parameter | Denominator | prior_n | Matches player param |
+|---|---|---|---|
+| `opp_rim_fg_pct` | `opp_rim_fga` | 25 | `_PRIOR_N_ZONE` |
+| `opp_mid_fg_pct` | `opp_mid_fga` | 25 | `_PRIOR_N_ZONE` |
+| `opp_3p_fg_pct` | `opp_3p_fga` | 25 | `_PRIOR_N_ZONE` |
+| `forced_to_rate` | `total_def_poss` | 50 | `_PRIOR_N_RATE` |
+| `dreb_rate` | `dreb_opp` | 50 | `_PRIOR_N_RATE` |
+
+**Effect on the 54.4% 3P example (n=57 shots, prior_n=25):**
+- weight = 57/(57+25) = 0.695
+- shrunk = 0.695 × 0.544 + 0.305 × 0.380 = 0.494
+- log5(0.3084, 0.494, 0.380) = 41.6% (vs 46.5% raw — noise dampened, signal preserved)
+
+**Why at read time, not write time:** The league averages used as the shrinkage prior will be recalculated as more games are added. Shrinking at write time bakes in the prior from the ingest run; shrinking at read time lets the prior stay current with the full dataset. The raw counts stored in DynamoDB are the durable artifact; the shrunk rate is a derived quantity.
+
+**Key property:** when n=0 (no defensive history), the shrunk rate equals the league average exactly. This naturally handles hypothetical lineups — see next entry.
+
+---
+
+## 2026-06-16 — Hypothetical lineup defense: league-average rates via shrinkage (named limitation)
+
+**This is the central P2 design decision.** The product premise is "any five vs any five," including lineups that never played together and therefore have no entry in `my5-lineup-metrics`.
+
+**CLAUDE.md constraint:** "Do not fabricate per-player defensive ratings." This rules out building a hypothetical lineup's defense from its individual players' historical defensive contributions.
+
+**Decision: use league-average defensive rates for any lineup with no `lineup_metrics` entry.**
+
+This falls directly out of the shrinkage framework: when n=0, the shrinkage formula returns league average (weight=0 on the observed rate, weight=1 on the prior). The engine needs no special case — a hypothetical lineup is treated as if it had zero defensive possessions on record, and shrinkage does the right thing automatically.
+
+**The three simulation modes and what the user gets:**
+
+| Matchup type | Defense quality |
+|---|---|
+| Real lineup vs real lineup (both have history) | Full signal — both sides use shrinkage-adjusted historical rates |
+| Real lineup vs hypothetical | Hypothetical side gets league-average defense; real side is normal |
+| Hypothetical vs hypothetical | Both sides get league-average defense; winner determined by offensive parameters only |
+
+**Required disclaimer (must appear in UI and API response when a lineup has no history):**
+
+> "This lineup has no defensive history. League-average defensive rates are used. The simulation captures offensive differences accurately; defensive variation only applies to lineups with real historical data."
+
+**Why not alternatives:**
+- *Team-level aggregated defense:* still requires all 5 players to share a team; doesn't apply to cross-era or cross-team hypotheticals; adds schema complexity.
+- *Nearest-neighbor proxy:* opaque, fragile, and hard to explain in an interview or to a user.
+- *Per-player defensive fabrication:* explicitly forbidden by CLAUDE.md.
+
+**Honest statement of the limitation:** for any invented matchup, the defensive dimension is uninformative — both teams play league-average defense. The simulation is an *offensive* sandbox in the hypothetical case. This is not a failure mode; it is an accurate description of what the data supports. State it plainly.
+
+---
+
+## 2026-06-16 — lg_tov denominator: tov_rate (per usage event) vs forced_to_rate (per possession) — proven different measurements, reconciled via conversion constant
+
+**The apparent inconsistency:** `lg_tov_rate` from player params = 0.1119 (TOV / usage events); `lg_forced_to_rate` from lineup metrics = 0.1262 (forced_TO / def_poss). Same 52-game slice; different numbers.
+
+**Proof that the numerators are identical:**
+- Total turnovers credited to players across 405 player records: **1301**
+- Total forced turnovers credited to lineups across 1819 lineup rows: **1301**
+
+Same turnovers, different denominators. This is not an inconsistency in counting; it is a measurement framing difference.
+
+**Why the denominators differ:**
+- `total_usage_events` (FGA + TOV + FT_trips summed across all players) = **11,628**
+- `total_def_poss` (defensive possessions summed across all lineup rows) = **10,306**
+
+The gap (1,322) comes from **offensive rebounds**. An OREB extends a possession without ending it: the defensive possession counter does not increment, but the offending player who grabs the OREB and then shoots (or turns it over) produces another usage event. Data confirms: 1,090 non-chained OREBs + ~232 from OREB chains = 1,322 extra usage events.
+
+**What each rate measures:**
+- `tov_rate` (player, stored): "when player P handles the ball, P turns it over X% of the time" — denominator = ball-handling events
+- `forced_to_rate` (lineup, stored): "in what fraction of possessions does this lineup force a turnover?" — denominator = defensive possessions
+
+**Resolution for the engine's log5 TO calculation:** after step 1 (player selection), the state machine is in the "P has the ball" conditional frame. The correct question is "given P has the ball for one ball-handling event, does a TO occur?" Both inputs must use the same denominator (per usage event). Convert the defensive rate at use time:
+
+```python
+DEF_POSS_TO_USAGE_EVENT = 0.8863  # = total_def_poss / total_usage_events = 10306/11628
+# Update this constant when the full season is aggregated.
+
+p_def_to = lineup.forced_to_rate * DEF_POSS_TO_USAGE_EVENT
+p_to = log5(player.tov_rate, p_def_to, lg=0.1119)
+```
+
+**Impact on the worked example (player 4871144 vs Team B):**
+- Without conversion: log5(0.10, 0.133, 0.1119) = 11.9%
+- With conversion:    log5(0.10, 0.1179, 0.1119) = 10.6%
+
+The 1.3 percentage-point difference is systematic: the uncorrected version always overstates TO probability because the defensive rate's denominator (possessions) is smaller than the offensive rate's denominator (usage events, inflated by OREBs). The converted version is the correct comparison.
