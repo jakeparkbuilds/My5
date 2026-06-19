@@ -431,6 +431,47 @@ That matches real NBA exactly. The gap is fully explained by the independence as
 
 ---
 
+## 2026-06-19 — P2-A async job flow: ElasticMQ + message-as-pointer + my5-sim-jobs table
+
+**Choice:** ElasticMQ (SQS-compatible Docker container) as the local queue; message body carries only `job_id`; all job state lives in a new `my5-sim-jobs` DynamoDB table.
+
+**Why ElasticMQ for the local queue:** ElasticMQ (`softwaremill/elasticmq-native:1.7.1`) implements the full SQS HTTP/Query API. boto3 connects to it with `endpoint_url="http://localhost:9324"`. The worker code is byte-for-byte identical on local ElasticMQ and real AWS SQS — the only difference is the endpoint URL, set by `MY5_ENV=local` (default) vs `MY5_ENV=aws`. Native visibility timeout, delete-on-success, and DLQ (`MaxReceiveCount=3`) work identically. No code change to port; config change only.
+
+Alternatives rejected: DynamoDB-as-queue (custom visibility timeout + retry counter = rewrite for SQS, not a port); in-memory Python Queue (no visibility timeout, message lost on crash); Redis Streams (different API entirely).
+
+**Why message-as-pointer:** SQS message body is `{"job_id": "uuid"}` only. All parameters (team_a_key, player_ids, league averages, seed) are in the `my5-sim-jobs` DynamoDB record. Separates queue schema from job schema: in-flight messages during a rolling deployment remain valid even if the job schema evolves. Also avoids the 256 KB SQS body limit as lineup data grows.
+
+**Why write DynamoDB record first, then enqueue:** If enqueue fails after the record is written, the job is stranded at QUEUED (visible, recoverable via re-enqueue). If we enqueued first then the record write failed, the worker would receive a message for a job_id that doesn't exist yet — a race condition with no recovery path.
+
+**DLQ handling (event-driven on AWS, polling loop locally):**
+The DLQ monitor's core logic (`fail_job()` + `delete()`) is identical on both targets. Locally it runs as a polling process. On AWS it is a second Lambda triggered by the DLQ — event-driven, $0 idle cost, fires only when messages arrive. Same `handle_dlq_message` function; different invocation shell. This mirrors the seam between `polling_loop` and the future `lambda_handler` for the main queue.
+
+**VisibilityTimeout = 60s (not 300s):** Engine runs in 1–20s on a modern laptop. 60s is a 3× worst-case margin. Crashed jobs become available for retry after 60s rather than 5 minutes — better latency at no correctness cost. MaxReceiveCount = 3.
+
+**State machine (legal transitions):**
+`QUEUED → RUNNING` (worker claims job, increments attempt_count)
+`RUNNING → DONE` (engine succeeds, result written, message deleted)
+`RUNNING → FAILED` (invalid lineup: fail-fast, delete msg, no retry — data won't appear on its own)
+`RUNNING → QUEUED` (implicit: worker crashes, VisibilityTimeout expires, SQS retries)
+`QUEUED → FAILED` (DLQ after 3 attempts; DLQ monitor writes FAILED)
+`DONE → skip` (duplicate delivery guard: delete msg, return "skipped" without re-running)
+
+**Idempotency via determinism:** The engine is deterministic (same seed → same result). If two workers race on the same job (rare VisibilityTimeout collision), both compute the same answer. Last DynamoDB writer wins; no corruption.
+
+**Cost ($0 at our scale):**
+- `my5-sim-jobs` DynamoDB: PAY_PER_REQUEST, $0 idle. Tens–thousands of jobs stay well within free tier (200M requests/month).
+- SQS queue + DLQ (AWS): $0.40/million requests, first 1M free. $0 in practice.
+- ElasticMQ (local): Docker container, $0 AWS cost.
+
+**Terraform provider v5 incompatibility with ElasticMQ (known limitation):**
+The Terraform AWS provider v5.x performs a `GetQueueAttributes` readiness poll after `CreateQueue`. ElasticMQ 1.7.1 does not return all the attributes the provider expects (`KmsMasterKeyId`, etc.), causing an indefinite polling hang. Workaround: `count = var.use_local ? 0 : 1` on the SQS Terraform resources — they only apply when deploying to real AWS. Local queues are created via `scripts/e2e_queue.py` or manually with boto3. DynamoDB tables (all 3) are managed by Terraform in both targets.
+
+**End-to-end verified (2026-06-19):**
+- Flow A: submitted real lineup matchup (teams 26 vs 12, seed=42) → QUEUED in DynamoDB + ElasticMQ message → `handle_job` ran engine → DONE with `mean_margin=2.17 pts`; stored result matched direct `simulate()` call exactly (delta=0.00e+00).
+- Flow B: submitted bogus player IDs → QUEUED → `handle_job` raised `LineupNotFoundError` → FAILED with `error_type=invalid_lineup`, message deleted.
+
+---
+
 ## 2026-06-17 — Net_rating is an imperfect head-to-head predictor for lopsided lineups
 
 **Context:** Validation Test 3 checks monotone ordering — when lineup A has a net_rating advantage ≥ 10 pts/100 over lineup B, the simulator should predict A wins the head-to-head. This passes 11/13 pairs. Both inversions involve team 12 (off_rating=153.9, def_rating=135.3, net=+18.6, n=102 possessions).
@@ -440,3 +481,53 @@ That matches real NBA exactly. The gap is fully explained by the independence as
 **Why net_rating fails here:** Net_rating conflates additive contributions from offense and defense. In a head-to-head, the defensive disadvantage of one team interacts with the offensive strength of the opponent multiplicatively. A +18.6 net_rating built from (+53.9 offense, −35.3 defense) can lose to a +4.7 net_rating built from (+17 offense, −7.7 defense) because the opponent's offense exploits the weak defense.
 
 **Design consequence:** The simulator is the correct arbiter of head-to-head outcomes, not net_rating. Net_rating is a summary statistic calibrated for season-level comparisons, not single-matchup predictions when the offense/defense imbalance is severe. This is by design; the simulator exists precisely because net_rating is insufficient.
+
+---
+
+## 2026-06-19 — P2-B: progress callback design — optional engine hook, sim-count throttling
+
+**The problem:** The UI needs to show simulation progress as it runs (e.g. "200 sims, ±2.3 pts"). The engine is sealed — we cannot change its math or add infrastructure awareness. We need live progress data without touching the RNG or breaking determinism.
+
+**Choice: optional `on_progress` callback, fired every `_PROGRESS_INTERVAL` sims.**
+
+```python
+def simulate(..., on_progress: Callable[[int, float], None] | None = None) -> SimResult:
+    ...
+    while n < _MAX_SIMS:
+        # ... Welford update ...
+        if n >= 2:
+            var = S / (n - 1)
+            ci_now = 1.96 * math.sqrt(var / n)
+            if on_progress is not None and n % _PROGRESS_INTERVAL == 0:
+                on_progress(n, round(ci_now, 2))
+            if n >= _MIN_SIMS and ci_now <= _CI_TARGET:
+                break
+```
+
+**Why a callback, not a queue / Redis pub-sub:** The engine is pure Python with no infrastructure imports. A callback lets the caller decide what to do (write to DDB, append to a list, log, assert in tests). The engine stays DB-agnostic and fully unit-testable by passing a list-appending lambda.
+
+**Seal intact:** `on_progress=None` (the default) produces a byte-identical SimResult for the same seed. The callback is called AFTER the Welford update and DOES NOT touch the RNG state (`np.random.Generator` is only advanced inside `_simulate_game`). Proven by `test_same_seed_with_and_without_callback_identical_result`.
+
+**Progress payload: `(sims_done: int, ci_half: float)`.** Not a percentage — total sim count is unknown upfront (CI stopping rule means we stop early or hit MAX_SIMS). The CI half-width is what matters: it's converging toward `_CI_TARGET = 2.0 pts`. The UI can show "200 sims, ±2.30 → converging."
+
+**Why `_PROGRESS_INTERVAL = 50` (not 500, not per-sim):**
+
+- **Per-sim writes** (interval=1): with _MAX_SIMS=5000, that's 5,000 DynamoDB writes per job. Each write has ~5ms local latency and costs a write unit. More importantly, DDB write latency would become the per-iteration bottleneck — the worker loop would be 5,000× slower than the compute.
+- **Interval=500**: for a typical 100–300 sim job, that's 0–1 writes. A job that converges at 247 sims would produce exactly 0 progress writes (first write fires at n=500, but the job already finished). The progress feed would be empty for most jobs.
+- **Interval=50**: 2–100 writes per job (2 writes for a 100-sim job, 100 writes for a 5,000-sim job). For a 258-sim job: 5 writes (at n=50,100,150,200,250). Observable, non-trivial sequence. At our scale (tens–hundreds of jobs total), worst-case total writes: 100 writes/job × 1,000 jobs = 100,000 DynamoDB writes. DynamoDB free tier is 200 million writes/month — we are 2,000× under the limit. Cost: $0.
+
+**Worker wiring:** `handle_job` creates a closure that calls `job_store.update_progress(job_id, sims_done, ci_half)` and passes it as `on_progress` to `simulate()`. `update_progress` does a SET on `progress_sims` and `progress_ci` fields — no reserved-word aliases needed. Fields are overwritten on each call (not appended — the latest value is all we need).
+
+**Status lifecycle with progress:** `status=running` while progress fields stream; `progress_sims` and `progress_ci` hold the last value written by the engine. When `status=done`, the `result` map holds the final SimResult. The progress fields are NOT cleared on completion — they show "last progress snapshot before done."
+
+**WebSockets deferred (P2-C):** This phase proves the data is in DynamoDB (polling-based). The next phase will push `progress_sims` / `progress_ci` updates over a WebSocket connection instead of requiring the client to poll. The field schema is already designed for push: each update is a small number + float, and the final result is written atomically to the `result` map.
+
+**E2E verified (2026-06-19):** 50ms polling thread captured live progress:
+```
+poll →    50 sims  CI ±4.42 pts  (status=running)
+poll →   150 sims  CI ±2.63 pts  (status=running)
+poll →   200 sims  CI ±2.30 pts  (status=running)
+poll →   250 sims  CI ±2.05 pts  (status=done)
+Result: 258 sims, mean_margin=+1.790 pts, converged=True
+```
+(The n=100 write was skipped by the poller — the engine ran faster than the 50ms poll interval. The data was written; polling just missed it. This is expected and not a bug.)

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -44,6 +44,7 @@ DEF_POSS_TO_USAGE_EVENT: float = 0.8863
 _CI_TARGET: float = 2.0      # halt when CI half-width ≤ this (points)
 _MIN_SIMS: int = 100
 _MAX_SIMS: int = 5000
+_PROGRESS_INTERVAL: int = 50  # call on_progress every N sims (≤100 writes/job at _MAX_SIMS)
 _POSS_PER_SIDE: int = 97     # Poisson mean for pace variation (per team per game)
 
 # ── Public types ──────────────────────────────────────────────────────────────
@@ -327,6 +328,7 @@ def simulate(
     team_b_lineup: LineupMetrics | None,
     league: LeagueAverages,
     seed: int | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> SimResult:
     """
     Run Monte Carlo simulation of team_a vs team_b to CI convergence.
@@ -339,6 +341,10 @@ def simulate(
     team_b_lineup  : lineup_metrics dict for team B (None = hypothetical)
     league         : league-wide baselines (see LeagueAverages)
     seed           : RNG seed for deterministic replay; None uses system entropy
+    on_progress    : optional callback(sims_done, ci_half_width) fired every
+                     _PROGRESS_INTERVAL sims. When None: behavior is byte-for-byte
+                     identical to before — same seed → same SimResult. The callback
+                     is a pure side-effect; it does not touch the RNG or Welford state.
 
     Stopping rule: Welford's online variance, stop when
     1.96 × sqrt(var/n) ≤ _CI_TARGET (2.0 pts) AND n ≥ _MIN_SIMS (100).
@@ -373,10 +379,12 @@ def simulate(
         sum_a += score_a
         sum_b += score_b
 
-        if n >= _MIN_SIMS and n >= 2:
+        if n >= 2:
             var = S / (n - 1)
-            ci = 1.96 * math.sqrt(var / n)
-            if ci <= _CI_TARGET:
+            ci_now = 1.96 * math.sqrt(var / n)
+            if on_progress is not None and n % _PROGRESS_INTERVAL == 0:
+                on_progress(n, round(ci_now, 2))
+            if n >= _MIN_SIMS and ci_now <= _CI_TARGET:
                 break
 
     var = S / max(n - 1, 1)
