@@ -382,3 +382,45 @@ resource "aws_sqs_queue" "job_queue" {
     maxReceiveCount     = 3
   })
 }
+
+# ── Outputs (AWS-only; empty when use_local=true) ─────────────────────────────
+
+output "ws_url" {
+  description = "Live WebSocket URL — connect with ?job_id=<uuid>"
+  value       = var.use_local ? "" : "wss://${aws_apigatewayv2_api.ws[0].id}.execute-api.us-east-1.amazonaws.com/prod"
+}
+
+output "apigw_id" {
+  description = "APIGW WebSocket API ID"
+  value       = var.use_local ? "" : aws_apigatewayv2_api.ws[0].id
+}
+
+output "ws_connections_table" {
+  description = "DynamoDB table name for WebSocket connection registry"
+  value       = var.use_local ? "" : aws_dynamodb_table.ws_connections[0].name
+}
+
+output "sim_jobs_table" {
+  description = "DynamoDB table name for simulation job records"
+  value       = aws_dynamodb_table.sim_jobs.name
+}
+
+output "sim_jobs_stream_arn" {
+  description = "DynamoDB Streams ARN for my5-sim-jobs (triggers fanout_handler)"
+  value       = var.use_local ? "" : aws_dynamodb_table.sim_jobs.stream_arn
+}
+
+output "connect_handler_name" {
+  description = "Lambda function name for $connect/$disconnect"
+  value       = var.use_local ? "" : aws_lambda_function.connect_handler[0].function_name
+}
+
+output "fanout_handler_name" {
+  description = "Lambda function name for DynamoDB Streams fanout"
+  value       = var.use_local ? "" : aws_lambda_function.fanout_handler[0].function_name
+}
+
+output "job_queue_url" {
+  description = "SQS queue URL for simulation job submission"
+  value       = var.use_local ? "" : aws_sqs_queue.job_queue[0].url
+}
