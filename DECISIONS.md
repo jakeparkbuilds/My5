@@ -663,3 +663,76 @@ Plan: 16 to add, 1 to change, 0 to destroy.
 16 new resources (ws_connections table, IAM role/policy/attachment, 2 Lambdas, APIGW API/integration/3 routes/stage, Lambda permission, Streams event source mapping, 2 SQS queues). 1 change: `sim_jobs` stream_enabled false→true.
 
 **Test suite: 82/82 pass** (67 prior + 15 new in `test_ws_aws.py`).
+
+---
+
+## 2026-06-20 — P3-cache: DynamoDB TTL over ElastiCache; submit-time check; symmetric seed-bound key
+
+**Choice:** New `my5-sim-cache` DynamoDB table (PAY_PER_REQUEST, TTL=7 days) for the simulation result cache, checked at `submit_job` call time.
+
+**Backend: DynamoDB TTL, NOT ElastiCache.**
+ElastiCache minimum is a single-node `cache.t4g.micro` cluster (~$13–16/month idle) — always-on cost for a cache that gets bursty, not steady, traffic. DynamoDB PAY_PER_REQUEST has zero idle cost. The access pattern (exact-key lookup of a blob) is a natural fit: one `GetItem` call per check (~1–5ms latency on real AWS), equivalent to what a Redis GET would cost over a network hop. For a student portfolio project with unpredictable traffic, $0 idle is the correct optimization.
+
+**Placement: submit_job, before any DynamoDB write or SQS enqueue.**
+A cache hit at submit time skips the entire downstream stack: no job record, no SQS message, no worker, no WebSocket. The result is returned immediately from one DynamoDB read. This is the fastest possible hit path. Deliberate consequence: a cached matchup skips the live-progress experience (no frames to stream). That is correct — a cache hit is instant; streaming zero progress frames makes no sense. Callers receive `SubmitResult(cache_hit=True, cached_result=...)` and can branch.
+
+**Cache key: sha256(sorted([lineup_key_a, lineup_key_b]) + "|seed=" + seed).**
+- `sorted()` makes the key symmetric: (A vs B) and (B vs A) hit the same entry. A matchup is the same game either way.
+- Seed IS in the key. The engine is deterministic: same inputs + same seed → identical bit-for-bit `SimResult`. A cache hit is provably equal to a fresh run — not an approximation. Different seeds produce different results and must not share an entry.
+- If `seed=None` (non-deterministic run), the cache is bypassed entirely. Non-deterministic results cannot be cached.
+
+**Invalidation: none needed.**
+With seed-in-key and a deterministic engine, there is no staleness. The 7-day TTL is operational hygiene (avoids unbounded table growth), not a cache-correctness mechanism. No explicit invalidation logic is required.
+
+**Cache write placement: after `job_store.write_result`, before `queue_client.delete`.**
+If the process dies between `write_result` and `cache.put`, the job record is done (durable) but the cache is empty. The next caller re-runs the engine — idempotent, same result. The reverse ordering (cache.put before write_result) would let a cache entry point to a job that may still be "running" if write_result fails — a consistency violation. Cache write is always after durable write.
+
+**`SubmitResult` return type change.**
+`submit_job` previously returned a `str` (job_id). It now returns `SubmitResult(job_id, cache_hit, cached_result)`. This is a clean API break justified by the cache adding a new return path (hit vs miss). All callers in the test suite updated in one diff. No backward-compat shim.
+
+**Terraform: `my5-sim-cache` has no `count` gate — enabled on both local and real AWS.**
+All other app tables (lineup_metrics, player_params, sim_jobs) are in both environments. Consistency: the cache table follows the same pattern. DynamoDB Local correctly emulates TTL configuration (doesn't auto-delete locally, but the field is stored).
+
+---
+
+## 2026-06-20 — P3-observability: EMF over PutMetricData; X-Ray via tracing_config; no SDK changes
+
+**Structured logging: JSON to stdout.**
+`log_job_event(job_id, event, **fields)` prints one compact JSON line per job lifecycle event (done, failed, cache_hit). Lambda stdout → CloudWatch Logs automatically. Locally it prints to the terminal. Searchable via Logs Insights queries (`filter event = "done" | stats avg(duration_ms)`). Zero configuration beyond Lambda's automatic log group.
+
+**CloudWatch Embedded Metric Format (EMF), not PutMetricData.**
+`emit_emf(metrics, dimensions)` prints one JSON line with a `_aws.CloudWatchMetrics` envelope. CloudWatch Logs auto-parses it into CloudWatch Metrics — no PutMetricData API calls, no separate SDK, no IAM for metric writes (beyond the standard log write permission). Cost: standard log ingestion ($0.50/GB), metric storage free for up to 10 custom metrics. This eliminates a separate API call per metric and keeps the Lambda code import-free (all stdlib + boto3).
+
+Two metrics emitted per job:
+- `job_latency_ms` (Milliseconds) with dimension `cache_status=miss` from `handle_job`. p99 is the headline.
+- `cache_hit_count` (Count) with dimension `cache_status=hit` from `submit_job` on hit.
+These go into namespace `My5/Simulator`, letting one CloudWatch query compare hit vs miss throughput.
+
+**X-Ray: `tracing_config { mode = "Active" }` on both Lambda functions, no SDK.**
+Lambda's built-in tracing captures: per-invocation segments (duration, cold start flag), automatic subsegments for every boto3 AWS SDK call (DynamoDB GetItem, PutItem, APIGW post_to_connection). This covers the entire observable path without installing `aws-xray-sdk` (which would need packaging in the Lambda zip). IAM statement `XRayTracing` added to the Lambda role.
+
+Cost: 100K traces/month free. $5/million after. At our scale (hundreds of invocations total): $0.
+
+**CloudWatch dashboard: Terraform resource, not a script.**
+`aws_cloudwatch_dashboard.my5` is defined inline in `main.tf` with `count = var.use_local ? 0 : 1`. Three widgets: (1) Job latency p99 on the miss path. (2) Cache hit vs miss count (same metric, two dimension slices). (3) DLQ depth (native SQS metric). Using Terraform means the dashboard is created on `terraform apply` and destroyed with the rest of the stack — no separate `scripts/dashboard.py` to run or forget. Cost: $3/dashboard/month, negligible.
+
+---
+
+## 2026-06-20 — P3-load-test: inline workers; throughput-at-p99 as headline
+
+**What we're testing.**
+The load test measures the caching layer's throughput, not the SQS worker pipeline. The two distinct latency profiles are:
+- Cache HIT: `submit_job` → `cache.get()` → return. One DynamoDB read. Latency ~1–10ms.
+- Cache MISS: `submit_job` → `cache.get()` (miss) → `job_store.put_job` → SQS enqueue → inline `handle_job` (engine run + DynamoDB writes + cache write). Latency ~100–500ms.
+
+**Inline workers for cache misses (not the SQS polling loop).**
+The load test calls `handle_job` directly in threads rather than routing through SQS (submit → ElasticMQ → polling_loop → handle_job). Reason: the SQS polling loop has a 20s long-poll wait between messages — adding this latency to every miss job would make the load test take minutes for 10 jobs and measure queue wait time, not engine time. The inline path exercises the identical engine code path with real DynamoDB I/O; only the SQS round-trip is omitted. That round-trip is measured separately by `scripts/e2e_queue.py`.
+
+**Two phases, same cache instance.**
+Phase 1 (misses): N unique lineup keys, run inline, populate cache. Phase 2 (hits): cycle through the same keys, submit only. The cache is shared across phases to guarantee hit rate in phase 2. `ThreadPoolExecutor(max_workers=concurrency)` runs both phases concurrently.
+
+**Headline metric: throughput (jobs/sec) at low p99 latency.**
+Raw throughput without p99 is misleading — a system can maximize throughput by letting tail latencies blow up. The interesting number is: "how many jobs/sec can we sustain while keeping p99 below X ms?" The load test reports p50 and p99 for both paths and overall throughput so you can read the tradeoff directly from the summary table.
+
+**DLQ depth measured at end of run.**
+A non-zero DLQ count after a load test means one or more jobs exceeded `maxReceiveCount=3` — structural failures, not random noise. The load test reads `ApproximateNumberOfMessages` from the DLQ and prints it. On local (ElasticMQ), this is skipped (returns 0).

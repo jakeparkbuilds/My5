@@ -31,7 +31,7 @@ from my5.job_store import JobStore, LineupNotFoundError
 from my5.job_worker import handle_job
 from my5.queue_client import QueueClient
 from my5.simulator import LeagueAverages, simulate
-from my5.submit_job import _DEFAULT_LEAGUE, _serialize_league, submit_job
+from my5.submit_job import SubmitResult, _DEFAULT_LEAGUE, _serialize_league, submit_job
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
@@ -217,7 +217,7 @@ def test_submit_job_writes_queued_record_and_enqueues():
     """submit_job must write a QUEUED DynamoDB record and send exactly one SQS message."""
     store, client, table, sqs = _make_store_and_client()
 
-    job_id = submit_job(
+    result = submit_job(
         team_a_key="lineup_key_a",
         team_a_player_ids=[100, 200, 300, 400, 500],
         team_b_key="lineup_key_b",
@@ -228,6 +228,10 @@ def test_submit_job_writes_queued_record_and_enqueues():
         queue_client=client,
     )
 
+    assert isinstance(result, SubmitResult), "submit_job must return a SubmitResult"
+    assert result.cache_hit is False, "No cache provided — must be a miss"
+    assert result.cached_result is None
+    job_id = result.job_id
     assert isinstance(job_id, str) and len(job_id) == 36, "job_id must be a UUID4 string"
 
     # DynamoDB record
@@ -240,8 +244,8 @@ def test_submit_job_writes_queued_record_and_enqueues():
     assert "league" in job
 
     # SQS queue
-    assert len(sqs.messages) == 1, "Exactly one SQS message must be enqueued"
     import json
+    assert len(sqs.messages) == 1, "Exactly one SQS message must be enqueued"
     body = json.loads(sqs.messages[0]["Body"])
     assert body["job_id"] == job_id, "SQS message body must contain only job_id"
 

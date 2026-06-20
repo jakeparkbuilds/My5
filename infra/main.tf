@@ -102,6 +102,30 @@ resource "aws_dynamodb_table" "sim_jobs" {
   stream_view_type = "NEW_IMAGE"
 }
 
+# ── Table 4: simulation result cache ─────────────────────────────────────────
+#
+# PK: cache_key (String) — sha256 of canonical (sorted) lineup-key pair + seed.
+# Symmetric: (A vs B, seed=42) and (B vs A, seed=42) map to the same key.
+# Seed-in-key: non-deterministic runs (seed=None) are never cached.
+#
+# Cost: $0 idle (PAY_PER_REQUEST). TTL auto-deletes after 7 days.
+# Enabled in BOTH local and real-AWS environments (same as the three core tables).
+resource "aws_dynamodb_table" "sim_cache" {
+  name         = "my5-sim-cache"
+  billing_mode = "PAY_PER_REQUEST" # $0 idle — on-demand, scales to zero
+  hash_key     = "cache_key"
+
+  attribute {
+    name = "cache_key"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+}
+
 # ── WebSocket connection registry (AWS only) ──────────────────────────────────
 #
 # Table 4: my5-ws-connections
@@ -205,6 +229,20 @@ resource "aws_iam_policy" "lambda_ws" {
         Action   = "execute-api:ManageConnections"
         Resource = "${aws_apigatewayv2_api.ws[0].execution_arn}/*"
       },
+      {
+        # X-Ray active tracing — Lambda emits segments automatically when
+        # tracing_config.mode = "Active". Free tier: 100K traces/month.
+        # After free tier: $5/million traces — negligible at our scale.
+        Sid    = "XRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+        ]
+        Resource = "*"
+      },
     ]
   })
 }
@@ -247,10 +285,17 @@ resource "aws_lambda_function" "connect_handler" {
   filename         = local.lambda_zip
   source_code_hash = filebase64sha256(local.lambda_zip)
 
-  runtime = "python3.11"
-  handler = "my5.ws.aws.connect_handler.handler"
-  timeout = 10
+  runtime     = "python3.11"
+  handler     = "my5.ws.aws.connect_handler.handler"
+  timeout     = 10
   memory_size = 128
+
+  # Active X-Ray tracing: Lambda emits trace segments automatically for each
+  # invocation + AWS SDK calls (DynamoDB put/delete). No sdk instrumentation needed.
+  # Cost: free for first 100K traces/month; $5/million after — $0 at our scale.
+  tracing_config {
+    mode = "Active"
+  }
 }
 
 resource "aws_lambda_function" "fanout_handler" {
@@ -272,6 +317,10 @@ resource "aws_lambda_function" "fanout_handler" {
       # Format: https://{api_id}.execute-api.{region}.amazonaws.com/{stage}
       APIGW_ENDPOINT = "https://${aws_apigatewayv2_api.ws[0].id}.execute-api.us-east-1.amazonaws.com/prod"
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 }
 
@@ -383,6 +432,89 @@ resource "aws_sqs_queue" "job_queue" {
   })
 }
 
+# ── CloudWatch dashboard (AWS only) ──────────────────────────────────────────
+#
+# Three headline widgets for P3 observability:
+#   1. Job latency p99 (cache-miss path) — custom EMF metric from job_worker.py
+#   2. Cache hit vs miss count — same metric, two dimension slices
+#   3. DLQ depth — native SQS metric; non-zero here means jobs are failing loudly
+#
+# Cost: $3/dashboard/month (AWS standard). One dashboard is negligible; billed
+# only when use_local=false. Free if you delete it: `terraform destroy -target=...`.
+#
+# EMF metrics appear in namespace My5/Simulator ~5 minutes after first Lambda run.
+# Before that, the graph widgets show "No data" — that is expected.
+
+resource "aws_cloudwatch_dashboard" "my5" {
+  count          = var.use_local ? 0 : 1
+  dashboard_name = "my5-simulator"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Job Latency p99 — Cache Miss Path"
+          view    = "timeSeries"
+          period  = 300
+          stat    = "p99"
+          metrics = [
+            ["My5/Simulator", "job_latency_ms", "env", "aws", "cache_status", "miss",
+              { "stat" : "p99", "label" : "p99 latency (ms)" }
+            ]
+          ]
+          yAxis = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Cache Hit vs Miss Count (5-min window)"
+          view    = "timeSeries"
+          period  = 300
+          metrics = [
+            ["My5/Simulator", "job_latency_ms", "env", "aws", "cache_status", "hit",
+              { "stat" : "SampleCount", "label" : "Cache Hits" }
+            ],
+            ["My5/Simulator", "job_latency_ms", "env", "aws", "cache_status", "miss",
+              { "stat" : "SampleCount", "label" : "Cache Misses" }
+            ]
+          ]
+          yAxis = { left = { min = 0 } }
+        }
+      },
+      {
+        type   = "metric"
+        x      = 0
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "DLQ Depth (non-zero = loud failure)"
+          view    = "timeSeries"
+          period  = 60
+          stat    = "Maximum"
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible",
+              "QueueName", "my5-jobs-dlq",
+              { "label" : "DLQ messages" }
+            ]
+          ]
+          yAxis = { left = { min = 0 } }
+        }
+      }
+    ]
+  })
+}
+
 # ── Outputs (AWS-only; empty when use_local=true) ─────────────────────────────
 
 output "ws_url" {
@@ -423,4 +555,14 @@ output "fanout_handler_name" {
 output "job_queue_url" {
   description = "SQS queue URL for simulation job submission"
   value       = var.use_local ? "" : aws_sqs_queue.job_queue[0].url
+}
+
+output "dashboard_url" {
+  description = "CloudWatch dashboard URL"
+  value       = var.use_local ? "" : "https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=my5-simulator"
+}
+
+output "sim_cache_table" {
+  description = "DynamoDB table name for simulation result cache"
+  value       = aws_dynamodb_table.sim_cache.name
 }

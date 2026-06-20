@@ -2,10 +2,13 @@
 Job submission: build a job record in DynamoDB and enqueue a pointer in SQS.
 
 submit_job() is the public entry point. It:
-  1. Generates a UUID4 job_id.
-  2. Writes a QUEUED job record to my5-sim-jobs (DynamoDB).
-  3. Sends {"job_id": job_id} to my5-jobs (SQS).
-  4. Returns the job_id to the caller for polling / display.
+  0. (Optional) Check cache: if seed is set and a SimCache is provided, a hit
+     returns SubmitResult(cache_hit=True, cached_result=...) immediately —
+     no job record written, no SQS message, no worker, no WebSocket.
+  1. Generate a UUID4 job_id.
+  2. Write a QUEUED job record to my5-sim-jobs (DynamoDB).
+  3. Send {"job_id": job_id} to my5-jobs (SQS).
+  4. Return SubmitResult(job_id=job_id, cache_hit=False).
 
 The SQS message body is intentionally minimal (pointer only). All job parameters
 live in DynamoDB, which is the single source of truth. This separates the queue
@@ -17,13 +20,31 @@ from __future__ import annotations
 import dataclasses
 import time
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from my5.config import SQS_QUEUE_URL
 from my5.job_store import JobStore
+from my5.logging_utils import ENV as _ENV, emit_emf, log_job_event
 from my5.queue_client import QueueClient
-from my5.simulator import LeagueAverages
+from my5.simulator import LeagueAverages, SimResult
+
+if TYPE_CHECKING:
+    from my5.cache import SimCache
+
+
+@dataclass
+class SubmitResult:
+    """
+    Return value of submit_job().
+
+    cache_hit=True  → cached_result is populated; job_id is None (no job was created).
+    cache_hit=False → job_id is a UUID4; cached_result is None; job is queued normally.
+    """
+    job_id: str | None
+    cache_hit: bool
+    cached_result: SimResult | None = None
 
 # ── Default league averages (52-game 2024-25 NBA slice) ──────────────────────
 #
@@ -74,9 +95,10 @@ def submit_job(
     league: LeagueAverages | None = None,
     job_store: JobStore | None = None,
     queue_client: QueueClient | None = None,
-) -> str:
+    cache: "SimCache | None" = None,
+) -> SubmitResult:
     """
-    Submit a simulation job and return the job_id.
+    Submit a simulation job and return a SubmitResult.
 
     team_a_key / team_b_key:
       The DynamoDB lineup_key string ("team_id#id0#id1#id2#id3#id4") for lineup
@@ -90,21 +112,45 @@ def submit_job(
     seed:
       RNG seed for deterministic replay. None = system entropy (non-reproducible).
       Recommended: pass a seed for debugging; omit for production simulations.
+      Cache is only consulted when seed is provided (non-deterministic runs can't cache).
 
     league:
       League-wide rate baselines. Defaults to the 52-game aggregation constants
       above. Pass a custom LeagueAverages when testing with different baselines.
 
-    job_store / queue_client:
-      Injectable for tests. Default to the real DynamoDB / SQS clients.
+    job_store / queue_client / cache:
+      Injectable for tests. Default to the real DynamoDB / SQS / cache clients.
 
-    Returns: job_id (UUID4 string). Poll my5-sim-jobs for status.
+    Returns: SubmitResult. On cache hit: job_id=None, cache_hit=True, cached_result populated.
+             On cache miss: job_id=<uuid>, cache_hit=False, cached_result=None.
     """
     if len(team_a_player_ids) != 5 or len(team_b_player_ids) != 5:
         raise ValueError("Each team must have exactly 5 player IDs.")
 
     if league is None:
         league = _DEFAULT_LEAGUE
+
+    # ── Cache check (submit-time, before any DynamoDB write or SQS enqueue) ──
+    # Only when seed is provided: non-deterministic runs produce different results
+    # each time and must never be cached.
+    if cache is not None and seed is not None:
+        from my5.cache import make_cache_key
+        _t0 = time.perf_counter()
+        cache_key = make_cache_key(team_a_key, team_b_key, seed)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            latency_ms = int((time.perf_counter() - _t0) * 1000)
+            log_job_event("cache_hit", "submit_cache_hit", latency_ms=latency_ms)
+            emit_emf(
+                metrics={"job_latency_ms": (latency_ms, "Milliseconds"), "cache_hit_count": (1, "Count")},
+                dimensions={"env": _ENV, "cache_status": "hit"},
+            )
+            return SubmitResult(job_id=None, cache_hit=True, cached_result=cached)
+
+    if job_store is None:
+        job_store = JobStore()
+    if queue_client is None:
+        queue_client = QueueClient()
 
     job_id = str(uuid.uuid4())
     now = _now_iso()
@@ -125,11 +171,6 @@ def submit_job(
     if seed is not None:
         item["seed"] = int(seed)
 
-    if job_store is None:
-        job_store = JobStore()
-    if queue_client is None:
-        queue_client = QueueClient()
-
     # ── Write job record first, then enqueue ──────────────────────────────────
     # Order matters: if the enqueue call fails, the job record exists but has no
     # SQS message. That's a stranded job (stuck at QUEUED forever), which is
@@ -139,7 +180,7 @@ def submit_job(
     job_store.put_job(item)
     queue_client.enqueue(job_id)
 
-    return job_id
+    return SubmitResult(job_id=job_id, cache_hit=False)
 
 
 def _now_iso() -> str:

@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from my5.config import DLQ_URL, make_dynamo_resource
 from my5.job_store import JobStore, LineupNotFoundError
+from my5.logging_utils import ENV as _ENV, emit_emf, log_job_event
 from my5.queue_client import QueueClient
 from my5.simulator import LeagueAverages, simulate
 
@@ -129,6 +130,7 @@ def handle_job(
     job_store: JobStore,
     fetch_lineup: Callable | None = None,
     dynamo_resource: Any = None,
+    cache: Any = None,
 ) -> str:
     """
     Process one simulation job end-to-end.
@@ -146,7 +148,11 @@ def handle_job(
 
     fetch_lineup: injectable for tests. Default hits DynamoDB via _default_fetch_lineup.
     dynamo_resource: the boto3 DynamoDB resource; created lazily if not provided.
+    cache: optional SimCache; if provided, writes the result to the cache after done.
+           Wrapped here (not inside the engine) to keep the engine sealed.
     """
+    _t_start = time.time()
+
     # ── 1. Idempotency check ──────────────────────────────────────────────────
     job = job_store.get_job(job_id)
     if job["status"] == "done":
@@ -188,6 +194,13 @@ def handle_job(
             completed_at=_now_iso(),
         )
         queue_client.delete(receipt_handle)
+        duration_ms = int((time.time() - _t_start) * 1000)
+        log_job_event(job_id, "failed", reason="invalid_lineup", duration_ms=duration_ms)
+        emit_emf(
+            metrics={"job_latency_ms": (duration_ms, "Milliseconds"), "job_failed": (1, "Count")},
+            dimensions={"env": _ENV, "cache_status": "miss"},
+            job_id=job_id,
+        )
         return "failed"
 
     # ── 4. Run the sealed engine ──────────────────────────────────────────────
@@ -215,7 +228,27 @@ def handle_job(
     # ── 5. Write result (RUNNING → DONE) ─────────────────────────────────────
     job_store.write_result(job_id, result, completed_at=_now_iso())
 
-    # ── 6. Acknowledge — message deleted only on clean success ────────────────
+    # ── 6. Write to cache (after durable write — never before) ───────────────
+    # Placed here so cache is populated only after the job record is durably done.
+    # If the process dies between 5 and here, the cache is empty and the next caller
+    # re-runs the engine (idempotent: same seed → same result). No data loss.
+    if cache is not None and seed is not None:
+        from my5.cache import make_cache_key
+        cache.put(make_cache_key(job["team_a_key"], job["team_b_key"], seed), result)
+
+    # ── 7. Emit structured log + EMF metric ───────────────────────────────────
+    duration_ms = int((time.time() - _t_start) * 1000)
+    log_job_event(
+        job_id, "done",
+        n_sims=result.n_sims, ci_half_width=result.ci_half_width, duration_ms=duration_ms,
+    )
+    emit_emf(
+        metrics={"job_latency_ms": (duration_ms, "Milliseconds"), "job_done": (1, "Count")},
+        dimensions={"env": _ENV, "cache_status": "miss"},
+        job_id=job_id, n_sims=result.n_sims,
+    )
+
+    # ── 8. Acknowledge — message deleted only on clean success ────────────────
     # If the process dies between step 4 and here, the message is not deleted.
     # VisibilityTimeout expires → SQS retries. The step-1 idempotency check
     # above then skips the re-run immediately.
