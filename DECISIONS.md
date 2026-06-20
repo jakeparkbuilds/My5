@@ -531,3 +531,90 @@ poll →   250 sims  CI ±2.05 pts  (status=done)
 Result: 258 sims, mean_margin=+1.790 pts, converged=True
 ```
 (The n=100 write was skipped by the poller — the engine ran faster than the 50ms poll interval. The data was written; polling just missed it. This is expected and not a bug.)
+
+---
+
+## 2026-06-19 — P2-B addendum: why interval=50 is the correct throttle for our CI stopping rule
+
+The P2-B entry above states the interval=50 rationale in terms of DynamoDB write cost. Here is the stopping-rule math that makes interval=500 wrong and interval=50 right:
+
+**The CI math:** Our engine has σ(margin) ≈ 16.6 pts (measured, DECISIONS.md 2026-06-17). The CI stopping rule halts at `1.96 × sqrt(σ² / n) ≤ 2.0 pts`. Solving: `n ≥ (1.96 × 16.6 / 2.0)² ≈ 264`. Typical convergence is near n=260 sims.
+
+**Why interval=500 is dead-on-arrival:** With convergence at n≈260, the first progress write would fire at n=500 — after the job is done. For every typical job, the progress feed is empty.
+
+**Why interval=50 is correct:** 260 / 50 = 5 progress writes for a typical job (at n=50, 100, 150, 200, 250). The UI gets a real convergence curve. At the hard cap (n=5000): 100 writes/job. At our scale: $0 (200M DynamoDB writes/month free tier).
+
+**E2E confirms:** seed=42 run converged at 257 sims → received frames at n=50, 100, 150, 200, 250 — exactly 5 progress frames, then done.
+
+---
+
+## 2026-06-19 — P2-C: WebSocket push — Option B (record as source of truth), NotifyingJobStore, register-then-snapshot
+
+**The core decision: Option B (fan-out from DynamoDB, not from worker)**
+
+The worker continues to write progress to the job record exactly as before (sealed). A separate fan-out stage delivers those writes to connected clients. Locally, this is `NotifyingJobStore` wrapping `JobStore`. On AWS, it is DynamoDB Streams → fan-out Lambda.
+
+Why not Option A (worker pushes directly): the worker would gain a second responsibility (compute + push), know about WebSocket infrastructure, and — most importantly — the job record would no longer be the single source of truth. If the engine completes and pushes "done" but crashes before `write_result` is called, the client sees terminal but the record shows "running." The record and client diverge. Option B cannot produce this: the bus event is posted after the durable write, so any client reading the record immediately after receives consistent state.
+
+**NotifyingJobStore is the local analog of DynamoDB Streams**
+
+`handle_job` takes `job_store` as an injected dependency. Locally, we inject `NotifyingJobStore(inner=JobStore(...), bus=bus)`. On AWS, we inject a plain `JobStore`. `handle_job` is byte-identical in both cases — it never knows whether the store notifies. The seam is the same pattern as ElasticMQ (local) vs SQS (AWS) for the queue.
+
+`NotifyingJobStore` wraps three write methods: `update_progress` (→ progress event), `write_result` (→ done event), `fail_job` (→ failed event). All other methods (`get_job`, `update_status`, `put_job`) delegate silently.
+
+**Atomic write confirmed:** `job_store.write_result` is ONE `update_item` call setting `status="done"`, the `result` map, and `completed_at` atomically. The bus event is posted after that single write. Any subscriber reading the job record after receiving the event will always see both `status` and `result` present — never one without the other.
+
+**Register-then-snapshot ordering (correctness-critical)**
+
+On connect, the handler registers the connection FIRST, then reads the job snapshot. The invariant: no client can finish the connect handshake without either receiving the terminal frame via fan-out OR reading terminal status in its snapshot.
+
+Why this order is correct: if the job goes terminal in the gap between register and snapshot, the fan-out puts the terminal frame on the connection's queue AND the snapshot reads terminal status. The client sees terminal via both paths. A duplicate terminal frame is cosmetic; a missed terminal frame would leave the client hung forever.
+
+Snapshot-then-register would create a window: if the job goes terminal after the snapshot is read (showing "running") but before registration, the fan-out fires for zero connections. The client enters the queue-drain loop with no future events — permanently hung.
+
+**Portable core (push_progress) and local seam (LocalSender)**
+
+The `push_progress(job_id, message, registry, sender)` function is identical local and on Lambda: look up connection IDs from the registry, serialize the message, call `sender.send(conn_id, payload)` for each, prune on GONE.
+
+The twin:
+| | Local | AWS |
+|---|---|---|
+| Registry backend | Python dict (process memory) | DynamoDB `my5-ws-connections` table |
+| `sender.send()` | `asyncio.Queue.put()` (LocalSender) | `post_to_connection()` APIGW Management API |
+| Fan-out trigger | NotifyingJobStore → EventBus | DynamoDB Streams → fan-out Lambda |
+| Connection lifecycle | `ws_handler` on/off | `$connect` / `$disconnect` Lambda routes |
+
+**Sync→async bridge (EventBus.post_threadsafe)**
+
+The worker runs in a sync thread; the WS server and bus consumer run on an asyncio event loop. The bridge: `loop.call_soon_threadsafe(queue.put_nowait, event)`. The server captures its event loop at startup (`bus.set_loop(asyncio.get_running_loop())`) before any workers start. The worker thread calls `bus.post_threadsafe(event)`, which schedules `put_nowait` on the server's loop thread — never blocking the worker, never crossing asyncio's thread boundary incorrectly. Tested in `test_bridge_sync_thread_to_async_bus`.
+
+**Message contract:**
+```
+progress: {"type":"progress","sims_done":int,"ci_half":float}
+done:     {"type":"done","n_sims":int,"mean_margin":float,
+           "ci_half_width":float,"equiv_net_rating":float,"converged":bool}
+failed:   {"type":"failed","error_type":str,"error_message":str}
+```
+
+**E2E verified (2026-06-19, in-memory, no Docker):**
+```
+(snapshot: job queued, waiting for worker...)
+  progress:    50 sims  CI ±4.08 pts
+  progress:   100 sims  CI ±3.25 pts
+  progress:   150 sims  CI ±2.67 pts
+  progress:   200 sims  CI ±2.31 pts
+  progress:   250 sims  CI ±2.02 pts
+
+  DONE after 257 sims
+    mean_margin      = -0.670 pts
+    ci_half_width    = 1.990 pts
+    equiv_net_rating = -0.7 pts/100
+    converged        = True
+
+  Direct simulate(seed=42) margin = -0.670 pts
+  Stack vs direct delta  = 0.00e+00  ✓
+
+  Total frames: 7 (1 snapshot + 5 progress + 1 done)
+```
+
+**AWS shell (not built in this phase):** DynamoDB Streams on `my5-sim-jobs`, fan-out Lambda, APIGW WebSocket, `my5-ws-connections` DynamoDB table. All scale to zero; no idle cost; no NAT gateway.
