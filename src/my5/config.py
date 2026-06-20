@@ -51,6 +51,33 @@ DLQ_URL: str = (
 )
 
 
+_SQS_ENV_VARS: dict[str, str] = {
+    "my5-jobs":     "MY5_SQS_QUEUE_URL",
+    "my5-jobs-dlq": "MY5_SQS_DLQ_URL",
+}
+
+
+def get_sqs_queue_url(queue_name: str) -> str:
+    """
+    Return the SQS queue URL for queue_name.
+
+    Local: constructs the ElasticMQ URL directly — no network call.
+    AWS:   reads MY5_SQS_QUEUE_URL / MY5_SQS_DLQ_URL if set;
+           otherwise calls GetQueueUrl by name so the account ID never
+           needs to be hardcoded or passed as an argument.
+
+    Prefer this over the module-level SQS_QUEUE_URL/DLQ_URL constants
+    in code that runs under MY5_ENV=aws without env vars set.
+    """
+    if USE_LOCAL:
+        return f"{_SQS_LOCAL_URL}/{_ELASTICMQ_ACCOUNT}/{queue_name}"
+    explicit = os.getenv(_SQS_ENV_VARS.get(queue_name, ""), "")
+    if explicit:
+        return explicit
+    client = boto3.client("sqs", region_name=_REGION)
+    return client.get_queue_url(QueueName=queue_name)["QueueUrl"]
+
+
 def make_sqs_client() -> Any:
     """Return a boto3 SQS low-level client for the active target."""
     kwargs: dict[str, Any] = {"region_name": _REGION}

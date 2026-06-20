@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from my5.config import SQS_QUEUE_URL
 from my5.job_store import JobStore
 from my5.logging_utils import ENV as _ENV, emit_emf, log_job_event
 from my5.queue_client import QueueClient

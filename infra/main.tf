@@ -9,6 +9,8 @@ terraform {
 
 # When use_local=true  → amazon/dynamodb-local on localhost:8000, ElasticMQ on localhost:9324, dummy creds.
 # When use_local=false → normal AWS provider (real deployment — not used yet).
+data "aws_region" "current" {}
+
 provider "aws" {
   region = "us-east-1"
 
@@ -460,6 +462,7 @@ resource "aws_cloudwatch_dashboard" "my5" {
         properties = {
           title   = "Job Latency p99 — Cache Miss Path"
           view    = "timeSeries"
+          region  = data.aws_region.current.name
           period  = 300
           stat    = "p99"
           metrics = [
@@ -479,6 +482,7 @@ resource "aws_cloudwatch_dashboard" "my5" {
         properties = {
           title   = "Cache Hit vs Miss Count (5-min window)"
           view    = "timeSeries"
+          region  = data.aws_region.current.name
           period  = 300
           metrics = [
             ["My5/Simulator", "job_latency_ms", "env", "aws", "cache_status", "hit",
@@ -500,6 +504,7 @@ resource "aws_cloudwatch_dashboard" "my5" {
         properties = {
           title   = "DLQ Depth (non-zero = loud failure)"
           view    = "timeSeries"
+          region  = data.aws_region.current.name
           period  = 60
           stat    = "Maximum"
           metrics = [

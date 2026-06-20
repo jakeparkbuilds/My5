@@ -44,6 +44,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from my5.cache import SimCache, make_cache_key
+from my5.config import USE_LOCAL, get_sqs_queue_url
 from my5.job_store import JobStore
 from my5.job_worker import handle_job
 from my5.queue_client import QueueClient
@@ -172,12 +173,12 @@ def _percentile(data: list[float], p: int) -> float:
 def _dlq_depth() -> int:
     """Read DLQ approximate visible count. Returns 0 if unavailable."""
     try:
-        from my5.config import DLQ_URL, USE_LOCAL, make_sqs_client
+        from my5.config import USE_LOCAL, get_sqs_queue_url, make_sqs_client
         if USE_LOCAL:
             return 0
         sqs = make_sqs_client()
         resp = sqs.get_queue_attributes(
-            QueueUrl=DLQ_URL,
+            QueueUrl=get_sqs_queue_url("my5-jobs-dlq"),
             AttributeNames=["ApproximateNumberOfMessages"],
         )
         return int(resp["Attributes"].get("ApproximateNumberOfMessages", 0))
@@ -194,6 +195,27 @@ def run_load_test(n_miss: int, n_hit: int, concurrency: int) -> None:
     print(f"  My5 P3 Load Test  (MY5_ENV={env})")
     print(f"  n_miss={n_miss}  n_hit={n_hit}  concurrency={concurrency}")
     print("=" * 64)
+
+    # Resolve and verify the SQS queue URL before touching anything else.
+    # get_sqs_queue_url() reads MY5_SQS_QUEUE_URL if set, then falls back to
+    # GetQueueUrl by name — never empty, never requires the account ID hardcoded.
+    resolved_queue_url = get_sqs_queue_url("my5-jobs")
+    print(f"\n  SQS queue URL : {resolved_queue_url}")
+    if not USE_LOCAL:
+        import subprocess
+        tf = subprocess.run(
+            ["terraform", "-chdir=infra", "output", "-raw", "job_queue_url"],
+            capture_output=True, text=True,
+        )
+        if tf.returncode == 0 and tf.stdout.strip():
+            tf_url = tf.stdout.strip()
+            match = "== terraform output ✓" if tf_url == resolved_queue_url else f"!= terraform output ✗  ({tf_url})"
+            print(f"  Terraform URL : {match}")
+            if tf_url != resolved_queue_url:
+                print("  ERROR: URL mismatch — aborting", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print("  (terraform output unavailable — skipping cross-check)")
 
     # Shared DynamoDB clients (thread-safe: boto3 clients are thread-safe)
     job_store = JobStore()

@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from my5.config import DLQ_URL, SQS_QUEUE_URL, make_sqs_client
+from my5.config import get_sqs_queue_url, make_sqs_client
 
 
 class QueueClient:
@@ -35,7 +35,7 @@ class QueueClient:
         queue_url: str | None = None,
     ) -> None:
         self._sqs = sqs_client if sqs_client is not None else make_sqs_client()
-        self._queue_url = queue_url if queue_url is not None else SQS_QUEUE_URL
+        self._queue_url = queue_url if queue_url is not None else get_sqs_queue_url("my5-jobs")
 
     def enqueue(self, job_id: str) -> str:
         """
@@ -104,4 +104,4 @@ class QueueClient:
 
     @property
     def dlq_url(self) -> str:
-        return DLQ_URL
+        return get_sqs_queue_url("my5-jobs-dlq")
