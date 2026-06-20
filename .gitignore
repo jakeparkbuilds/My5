@@ -32,6 +32,8 @@ data/
 crash.log
 crash.*.log
 # .terraform.lock.hcl IS committed — it pins provider versions like requirements.lock
+# Lambda deployment packages are build artifacts, not source
+infra/*.zip
 
 # AWS credentials — never commit these
 .aws/

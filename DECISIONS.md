@@ -618,3 +618,48 @@ failed:   {"type":"failed","error_type":str,"error_message":str}
 ```
 
 **AWS shell (not built in this phase):** DynamoDB Streams on `my5-sim-jobs`, fan-out Lambda, APIGW WebSocket, `my5-ws-connections` DynamoDB table. All scale to zero; no idle cost; no NAT gateway.
+
+---
+
+## 2026-06-19 — P2-C AWS shell: DynamoDBRegistry, Streams fanout, APIGW WebSocket, shared emitter
+
+**What was built:** The AWS backend behind the frozen local interfaces. Exactly the same `push_progress` portable core; only the registry and sender swap.
+
+**Registry backend: DynamoDB `my5-ws-connections` table (not the local Python dict)**
+
+PK=`conn_id` (S) for O(1) put/delete (register/unregister). GSI `job_id-index` (PK=`job_id`, projection ALL) for O(1) query (lookup). PAY_PER_REQUEST → $0 idle. `DynamoDBRegistry` uses the DynamoDB low-level client API (not the resource API) so `KeyConditionExpression` is a plain string — simpler to fake in tests than `boto3.dynamodb.conditions.Key()` objects.
+
+**Fan-out trigger: DynamoDB Streams on `my5-sim-jobs` → `fanout_handler` Lambda**
+
+Streams enabled (`NEW_IMAGE`) on the `sim_jobs` table when `use_local=false`. Every `update_item` (progress, write_result, fail_job) fires a stream record. The `fanout_handler` Lambda receives it, deserializes with `TypeDeserializer`, builds the WS message via `job_record_to_message` (shared emitter), and calls `push_progress(registry=DynamoDBRegistry, sender=ApiGwSender)`. On AWS, `handle_job` gets a plain `JobStore` (not `NotifyingJobStore`) — the fan-out trigger is at the DynamoDB layer, invisible to the worker. The seam is identical to ElasticMQ vs SQS.
+
+**Sender: `ApiGwSender` → `post_to_connection` (APIGW Management API)**
+
+`async def send(conn_id, payload)` conforms to the `Sender` Protocol. Success → `None`. HTTP 410 `GoneException` → returns `GONE` sentinel; `push_progress` prunes the dead conn_id from the registry. Other errors propagate. The boto3 call is synchronous inside an `async def` — acceptable in Lambda (single-threaded); a future optimization would use `asyncio.to_thread()` for high-fan-out.
+
+**Shared emitter: `ws/emit.py` → `job_record_to_message` (factored out of `server.py`)**
+
+Previously `_job_to_message` was defined locally in `server.py`. Now it lives in `ws/emit.py` as the public `job_record_to_message`, imported in `server.py` as the private alias `_job_to_message` (backward-compatible for tests). `fanout_handler` also imports from `ws/emit.py`. The shared-emitter test asserts `server._job_to_message is emit.job_record_to_message` (same object) and that Decimal-typed Streams output and float-typed local output produce identical WS message dicts.
+
+**APIGW WebSocket API**
+
+`$connect` → `connect_handler(register)`, `$disconnect` → `connect_handler(unregister)`, `$default` → `connect_handler` (no-op 200; clients don't send messages). `auto_deploy=true` on the `prod` stage. Lambda permissions wired with `source_arn = execution_arn/*`. Cost: $1/million connection-minutes + $1/million messages. $0 idle.
+
+**IAM: least-privilege single role for both Lambdas**
+
+- `logs:*` on CloudWatch Logs
+- `dynamodb:PutItem,DeleteItem,Query,GetItem` on `ws_connections` table + GSI
+- `dynamodb:GetRecords,GetShardIterator,DescribeStream,ListStreams` on `sim_jobs` stream ARN
+- `execute-api:ManageConnections` on `ws` APIGW execution ARN
+
+**No NAT gateway, no VPC, no always-on compute.** All resources scale to zero.
+
+**Terraform gate:** All new resources use `count = var.use_local ? 0 : 1`. Existing local tables unchanged when `use_local=true`. New `planning_only` variable skips credential/account validation for `terraform plan` without real AWS creds.
+
+**Plan output (2026-06-19, `-var="use_local=false" -var="planning_only=true" -refresh=false`):**
+```
+Plan: 16 to add, 1 to change, 0 to destroy.
+```
+16 new resources (ws_connections table, IAM role/policy/attachment, 2 Lambdas, APIGW API/integration/3 routes/stage, Lambda permission, Streams event source mapping, 2 SQS queues). 1 change: `sim_jobs` stream_enabled false→true.
+
+**Test suite: 82/82 pass** (67 prior + 15 new in `test_ws_aws.py`).

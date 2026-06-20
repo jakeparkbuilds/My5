@@ -34,6 +34,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from my5.ws.emit import job_record_to_message as _job_to_message  # shared with fanout_handler
 from my5.ws.push import GONE, push_progress
 
 
@@ -66,46 +67,6 @@ class LocalSender:
             return GONE
         await q.put(payload)
         return None
-
-
-# ── Message helpers ───────────────────────────────────────────────────────────
-
-
-def _job_to_message(job: dict[str, Any]) -> dict[str, Any]:
-    """
-    Convert a job record to a WebSocket message.
-
-    Used for the initial snapshot on connect (late-joiner recovery).
-    The message type determines whether the client should wait for more frames.
-    """
-    status = job.get("status", "queued")
-
-    if status == "done":
-        r = job["result"]
-        return {
-            "type": "done",
-            "n_sims": int(r["n_sims"]),
-            "mean_margin": float(r["mean_margin"]),
-            "ci_half_width": float(r["ci_half_width"]),
-            "equiv_net_rating": float(r["equiv_net_rating"]),
-            "converged": bool(r["converged"]),
-        }
-
-    if status == "failed":
-        return {
-            "type": "failed",
-            "error_type": job.get("error_type", "unknown"),
-            "error_message": job.get("error_message", ""),
-        }
-
-    # queued or running — send latest progress snapshot (sims_done=0 if not started)
-    sims = job.get("progress_sims")
-    ci = job.get("progress_ci")
-    return {
-        "type": "progress",
-        "sims_done": int(sims) if sims is not None else 0,
-        "ci_half": float(ci) if ci is not None else 0.0,
-    }
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
