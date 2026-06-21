@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>My5 Lab - Active Simulation</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&amp;family=IBM+Plex+Mono:wght@500;600&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        "colors": {
+                "on-surface-variant": "#bcc9cd",
+                "surface-container": "#191f31",
+                "primary-fixed": "#acedff",
+                "surface-bright": "#33394c",
+                "obsidian-base": "#020617",
+                "background": "#0c1324",
+                "on-secondary-fixed-variant": "#354e00",
+                "surface-container-highest": "#2e3447",
+                "error-container": "#93000a",
+                "on-tertiary-container": "#5b3200",
+                "on-secondary": "#233600",
+                "surface-dim": "#0c1324",
+                "primary-container": "#06b6d4",
+                "primary-fixed-dim": "#4cd7f6",
+                "tertiary-fixed": "#ffdcbf",
+                "secondary": "#a4d64c",
+                "tertiary-fixed-dim": "#ffb873",
+                "data-gray": "#94a3b8",
+                "charcoal-surface": "#0f172a",
+                "secondary-fixed": "#bff365",
+                "on-primary-fixed-variant": "#004e5c",
+                "surface": "#0c1324",
+                "outline": "#869397",
+                "surface-tint": "#4cd7f6",
+                "tertiary": "#ffb873",
+                "secondary-fixed-dim": "#a4d64c",
+                "inverse-primary": "#00687a",
+                "inverse-surface": "#dce1fb",
+                "on-secondary-container": "#1e2f00",
+                "on-error": "#690005",
+                "surface-container-high": "#23293c",
+                "surface-container-lowest": "#070d1f",
+                "error": "#ffb4ab",
+                "on-primary-container": "#00424f",
+                "inverse-on-surface": "#2a3043",
+                "electric-cyan": "#06b6d4",
+                "on-error-container": "#ffdad6",
+                "surface-variant": "#2e3447",
+                "on-tertiary": "#4b2800",
+                "on-tertiary-fixed-variant": "#6a3b00",
+                "on-primary": "#003640",
+                "primary": "#4cd7f6",
+                "surface-container-low": "#151b2d",
+                "on-secondary-fixed": "#131f00",
+                "neon-volt": "#bef264",
+                "on-tertiary-fixed": "#2d1600",
+                "secondary-container": "#719e13",
+                "on-surface": "#dce1fb",
+                "outline-variant": "#3d494c",
+                "tertiary-container": "#e89337",
+                "on-background": "#dce1fb",
+                "on-primary-fixed": "#001f26"
+        },
+        "borderRadius": {
+                "DEFAULT": "0.25rem",
+                "lg": "0.5rem",
+                "xl": "0.75rem",
+                "full": "9999px"
+        },
+        "spacing": {
+                "margin-desktop": "32px",
+                "gutter": "16px",
+                "margin-mobile": "16px",
+                "container-max": "1440px",
+                "grid-unit": "4px",
+                "stack-sm": "8px",
+                "stack-md": "16px",
+                "stack-lg": "32px",
+                "container-padding": "24px"
+        },
+        "fontFamily": {
+                "headline-lg-mobile": [
+                        "Hanken Grotesk"
+                ],
+                "body-lg": [
+                        "Hanken Grotesk"
+                ],
+                "label-mono-sm": [
+                        "IBM Plex Mono"
+                ],
+                "body-md": [
+                        "Hanken Grotesk"
+                ],
+                "label-mono-lg": [
+                        "IBM Plex Mono"
+                ],
+                "headline-md": [
+                        "Hanken Grotesk"
+                ],
+                "headline-lg": [
+                        "Hanken Grotesk"
+                ],
+                "headline-xl": [
+                        "Hanken Grotesk"
+                ]
+        },
+        "fontSize": {
+                "headline-lg-mobile": [
+                        "28px",
+                        {
+                                "lineHeight": "1.2",
+                                "fontWeight": "700"
+                        }
+                ],
+                "body-lg": [
+                        "18px",
+                        {
+                                "lineHeight": "1.6",
+                                "fontWeight": "400"
+                        }
+                ],
+                "label-mono-sm": [
+                        "12px",
+                        {
+                                "lineHeight": "1.2",
+                                "letterSpacing": "0.1em",
+                                "fontWeight": "500"
+                        }
+                ],
+                "body-md": [
+                        "16px",
+                        {
+                                "lineHeight": "1.5",
+                                "fontWeight": "400"
+                        }
+                ],
+                "label-mono-lg": [
+                        "14px",
+                        {
+                                "lineHeight": "1.2",
+                                "letterSpacing": "0.05em",
+                                "fontWeight": "600"
+                        }
+                ],
+                "headline-md": [
+                        "24px",
+                        {
+                                "lineHeight": "1.3",
+                                "fontWeight": "600"
+                        }
+                ],
+                "headline-lg": [
+                        "32px",
+                        {
+                                "lineHeight": "1.2",
+                                "letterSpacing": "-0.01em",
+                                "fontWeight": "700"
+                        }
+                ],
+                "headline-xl": [
+                        "48px",
+                        {
+                                "lineHeight": "1.1",
+                                "letterSpacing": "-0.02em",
+                                "fontWeight": "800"
+                        }
+                ]
+        }
+},
+    },
+  }
+</script>
+<style>
+        .pulse-light {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; box-shadow: 0 0 0 0 rgba(76, 215, 246, 0.7); }
+            70% { opacity: 0.5; box-shadow: 0 0 0 6px rgba(76, 215, 246, 0); }
+            100% { opacity: 1; box-shadow: 0 0 0 0 rgba(76, 215, 246, 0); }
+        }
+        .wobble-text {
+            animation: wobble 0.5s infinite alternate;
+        }
+        @keyframes wobble {
+            from { transform: translateY(-1px); }
+            to { transform: translateY(1px); }
+        }
+        .scroll-feed {
+            animation: scroll-up 10s linear infinite;
+        }
+        @keyframes scroll-up {
+            0% { transform: translateY(100%); }
+            100% { transform: translateY(-100%); }
+        }
+      </style>
+</head>
+<body class="bg-background text-on-background font-body-md min-h-screen flex antialiased">
+<!-- SideNavBar -->
+<nav class="h-screen w-64 fixed left-0 top-0 bg-surface-dim dark:bg-surface-dim bg-surface-container-low border-r border-outline-variant hidden md:flex flex-col h-full py-container-padding px-stack-md gap-stack-lg z-40">
+<div class="flex items-center gap-stack-sm mb-stack-lg">
+<div class="w-10 h-10 rounded-full bg-surface-container-high flex items-center justify-center overflow-hidden border border-outline-variant">
+<img alt="User Analytics Profile" class="w-full h-full object-cover" data-alt="A futuristic, high-tech, abstract representation of a user profile in an engineered basketball analytics lab. Subtle glowing data nodes, dark slate background, professional, minimal, clinical." src="https://lh3.googleusercontent.com/aida-public/AB6AXuBM2kqluxaFHjSox4k9PIovtk3Lob6uajqSNmxjtNyLb5UuFCtxa11feU0J9O6vgF_4Tc8_A2HPdjANQjNd5b8p18S_kGurkMuBtolQPBgJ6YR-fkv6DN6nyndyRXMZ8zA-d0AOllg_JSrNH0oTR_nLyIum_mT0bfjxkYW9WaaITmDcAiWzXJl5SlpSCrCnkt_0t9Lkufcwp3wrAx9n5azDgRZPQNP83B46b6pk7VTiu_Rw3ivzp4kXJlciKBkM2lNZvqRD-u6abDQ"/>
+</div>
+<div>
+<h1 class="text-headline-md font-headline-md text-primary tracking-tighter">My5 Lab</h1>
+<p class="text-label-mono-sm font-label-mono-sm text-on-surface-variant">Engineered Basketball</p>
+</div>
+</div>
+<ul class="flex flex-col gap-grid-unit">
+<li>
+<a class="flex items-center gap-stack-sm px-stack-md py-stack-sm rounded-lg hover:bg-surface-container-high transition-colors duration-200 text-primary font-bold border-r-2 border-primary bg-surface-container-high" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">science</span>
+<span class="text-label-mono-lg font-label-mono-lg">Sandbox</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-stack-sm px-stack-md py-stack-sm rounded-lg text-on-surface-variant font-medium hover:bg-surface-container-high transition-colors duration-200" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="text-label-mono-lg font-label-mono-lg">History</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-stack-sm px-stack-md py-stack-sm rounded-lg text-on-surface-variant font-medium hover:bg-surface-container-high transition-colors duration-200" href="#">
+<span class="material-symbols-outlined">info</span>
+<span class="text-label-mono-lg font-label-mono-lg">About</span>
+</a>
+</li>
+</ul>
+</nav>
+<!-- TopAppBar (Mobile) -->
+<header class="flex justify-between items-center w-full px-container-padding h-16 bg-surface-dim/40 backdrop-blur-xl docked full-width top-0 sticky z-50 bg-surface-container-lowest/80 border-b border-outline-variant md:hidden">
+<h1 class="text-headline-lg-mobile font-headline-lg-mobile text-primary tracking-tight">My5 Basketball Lab</h1>
+<div class="flex items-center gap-stack-sm">
+<button class="text-on-surface-variant hover:text-on-surface transition-all focus:ring-1 focus:ring-primary rounded-full p-2">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<button class="text-on-surface-variant hover:text-on-surface transition-all focus:ring-1 focus:ring-primary rounded-full p-2">
+<span class="material-symbols-outlined">account_circle</span>
+</button>
+</div>
+</header>
+<!-- Main Canvas -->
+<main class="flex-1 md:ml-64 p-container-padding grid grid-cols-4 md:grid-cols-12 gap-container-padding h-screen overflow-hidden">
+<!-- Left Rail: Team A (Dimmed) -->
+<aside class="col-span-4 md:col-span-3 flex flex-col gap-stack-md opacity-40 transition-opacity duration-500">
+<div class="bg-surface-container-high border border-outline-variant rounded-xl p-stack-md">
+<h2 class="text-label-mono-sm font-label-mono-sm text-on-surface-variant mb-stack-sm">HOME LINEUP</h2>
+<div class="space-y-stack-sm">
+<!-- Player Mockup -->
+<div class="flex items-center justify-between p-stack-sm bg-surface-container-low rounded border border-outline-variant/50">
+<div class="flex items-center gap-stack-sm">
+<span class="text-label-mono-sm font-label-mono-sm text-secondary bg-surface px-1 py-0.5 rounded text-[10px]">PG</span>
+<span class="text-body-md font-body-md text-data-gray">S. Curry</span>
+</div>
+<span class="text-label-mono-sm font-label-mono-sm text-primary">96</span>
+</div>
+<div class="flex items-center justify-between p-stack-sm bg-surface-container-low rounded border border-outline-variant/50">
+<div class="flex items-center gap-stack-sm">
+<span class="text-label-mono-sm font-label-mono-sm text-secondary bg-surface px-1 py-0.5 rounded text-[10px]">SG</span>
+<span class="text-body-md font-body-md text-data-gray">K. Thompson</span>
+</div>
+<span class="text-label-mono-sm font-label-mono-sm text-primary">89</span>
+</div>
+</div>
+</div>
+</aside>
+<!-- Center: Simulation Hub -->
+<section class="col-span-4 md:col-span-6 flex flex-col items-center justify-center relative">
+<!-- Live Indicator -->
+<div class="absolute top-0 left-1/2 transform -translate-x-1/2 flex items-center gap-2 bg-surface-container-highest px-4 py-2 rounded-full border border-primary/30">
+<div class="w-3 h-3 rounded-full bg-primary pulse-light"></div>
+<span class="text-label-mono-sm font-label-mono-sm text-primary">LIVE SIMULATION IN PROGRESS</span>
+</div>
+<!-- Central Data Rings -->
+<div class="relative w-80 h-80 flex items-center justify-center">
+<!-- Outer Progress Ring (Mocked with SVG) -->
+<svg class="absolute inset-0 w-full h-full transform -rotate-90" viewbox="0 0 100 100">
+<circle cx="50" cy="50" fill="none" r="45" stroke="#3d494c" stroke-width="4"></circle>
+<circle class="transition-all duration-1000 ease-linear" cx="50" cy="50" fill="none" r="45" stroke="#4cd7f6" stroke-dasharray="283" stroke-dashoffset="70" stroke-width="4"></circle>
+</svg>
+<div class="text-center z-10 flex flex-col items-center">
+<span class="text-label-mono-sm font-label-mono-sm text-on-surface-variant tracking-widest mb-2">SIMS EXECUTED</span>
+<span class="text-headline-lg font-headline-lg text-secondary">7,500 <span class="text-on-surface-variant text-body-md">/ 10,000</span></span>
+<div class="mt-8 border-t border-outline-variant/50 pt-4 w-48">
+<span class="text-label-mono-sm font-label-mono-sm text-on-surface-variant block mb-1">CONVERGENCE</span>
+<span class="text-headline-xl font-headline-xl text-primary drop-shadow-[0_0_12px_rgba(76,215,246,0.6)]">±2.04</span>
+</div>
+<div class="mt-4">
+<span class="text-label-mono-sm font-label-mono-sm text-on-surface-variant block mb-1">CURRENT MARGIN</span>
+<span class="text-headline-md font-headline-md text-on-surface wobble-text inline-block">+3.4</span>
+</div>
+</div>
+</div>
+<!-- Simulation Matchup Indicator -->
+<div class="mt-stack-sm flex items-center justify-center gap-stack-md">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-secondary"></span>
+<span class="text-label-mono-sm font-label-mono-sm text-on-surface-variant">TEAM A OFFENSE</span>
+</div>
+<span class="text-on-surface-variant">vs</span>
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-error"></span>
+<span class="text-label-mono-sm font-label-mono-sm text-on-surface-variant">TEAM B DEFENSE</span>
+</div>
+</div>
+<!-- Telemetry Log -->
+<div class="mt-stack-md w-full max-w-md bg-surface-container-lowest border border-outline-variant rounded-lg h-32 overflow-hidden relative p-stack-sm font-label-mono-sm">
+<div class="absolute inset-x-0 top-0 h-4 bg-gradient-to-b from-surface-container-lowest to-transparent z-10"></div>
+<div class="absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-surface-container-lowest to-transparent z-10"></div>
+<div class="text-label-mono-sm text-data-gray/70 h-full overflow-hidden relative">
+<div class="scroll-feed flex flex-col gap-1 whitespace-nowrap">
+<span>[SYS] ALLOCATING CLUSTER RESOURCES...</span>
+<span>[NET] ESTABLISHING MONTE CARLO SEEDS...</span>
+<span>[STAT] INGESTING HISTORICAL VECTORS...</span>
+<span>[SYS] CORE 1-8 ACTIVE.</span>
+<span class="text-secondary">[SIM] BATCH 1 COMPLETE. (1000 POSSESSIONS)</span>
+<span>[NET] 2,500 POSSESSIONS PROCESSED...</span>
+<span>[STAT] VARIANCE DETECTED IN Q4 MODELS...</span>
+<span>[SYS] RECALIBRATING...</span>
+<span class="text-secondary">[SIM] BATCH 2 COMPLETE. (2500 POSSESSIONS)</span>
+<span>[STAT] CONVERGENCE AT 45%...</span>
+<span>[NET] 5,200 POSSESSIONS PROCESSED...</span>
+<span>[SYS] AGGREGATING CORES...</span>
+<span class="text-secondary">[SIM] BATCH 3 COMPLETE. (5000 POSSESSIONS)</span>
+<span>[STAT] CONVERGENCE AT 72%...</span>
+<span>[NET] 7,500 POSSESSIONS PROCESSED...</span>
+<span class="text-primary">[STAT] CONVERGENCE AT 88%...</span>
+</div>
+</div>
+</div>
+</section>
+<!-- Right Rail: Team B (Dimmed) -->
+<aside class="col-span-4 md:col-span-3 flex flex-col gap-stack-md opacity-40 transition-opacity duration-500">
+<div class="bg-surface-container-high border border-outline-variant rounded-xl p-stack-md">
+<h2 class="text-label-mono-sm font-label-mono-sm text-on-surface-variant mb-stack-sm text-right">AWAY LINEUP</h2>
+<div class="space-y-stack-sm">
+<!-- Player Mockup -->
+<div class="flex items-center justify-between p-stack-sm bg-surface-container-low rounded border border-outline-variant/50">
+<span class="text-label-mono-sm font-label-mono-sm text-error">94</span>
+<div class="flex items-center gap-stack-sm">
+<span class="text-body-md font-body-md text-data-gray">D. Fox</span>
+<span class="text-label-mono-sm font-label-mono-sm text-secondary bg-surface px-1 py-0.5 rounded text-[10px]">PG</span>
+</div>
+</div>
+<div class="flex items-center justify-between p-stack-sm bg-surface-container-low rounded border border-outline-variant/50">
+<span class="text-label-mono-sm font-label-mono-sm text-error">88</span>
+<div class="flex items-center gap-stack-sm">
+<span class="text-body-md font-body-md text-data-gray">M. Monk</span>
+<span class="text-label-mono-sm font-label-mono-sm text-secondary bg-surface px-1 py-0.5 rounded text-[10px]">SG</span>
+</div>
+</div>
+</div>
+</div>
+</aside>
+</main>
+<script>
+        // Minimal interaction logic can go here if needed, 
+        // e.g., to simulate the progress bar filling up.
+    </script>
+</body></html>
