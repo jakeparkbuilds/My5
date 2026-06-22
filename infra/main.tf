@@ -571,3 +571,405 @@ output "sim_cache_table" {
   description = "DynamoDB table name for simulation result cache"
   value       = aws_dynamodb_table.sim_cache.name
 }
+
+# ── Worker Lambda (SQS-triggered simulation processor) ───────────────────────
+#
+# Calls handle_job() for each message from my5-jobs. Byte-identical core to
+# the local polling_loop — only the invocation shell differs.
+#
+# Package: src/my5/ + numpy + boto3, built for manylinux_2_17_x86_64.
+# Timeout: 60s (worst-case 5000-sim run is ~20s; 60s gives safe headroom).
+# Memory: 256MB (higher memory → more CPU allocation; numpy benefits).
+# Cost: $0 idle (scale-to-zero). Billed per 100ms of invocation.
+
+locals {
+  worker_lambda_zip = "${path.module}/my5_worker_lambda.zip"
+  api_lambda_zip    = "${path.module}/my5_api_lambda.zip"
+}
+
+resource "aws_iam_role" "lambda_worker" {
+  count = var.use_local ? 0 : 1
+  name  = "my5-lambda-worker-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "lambda_worker" {
+  count = var.use_local ? 0 : 1
+  name  = "my5-lambda-worker-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "Logs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        # SQS event source mapping: Lambda's internal poller needs ReceiveMessage
+        # + DeleteMessage + GetQueueAttributes to manage the event source.
+        Sid    = "SQSConsume"
+        Effect = "Allow"
+        Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Resource = aws_sqs_queue.job_queue[0].arn
+      },
+      {
+        # sim-jobs: get (idempotency check), update_status, update_progress,
+        # write_result, fail_job — all via update_item or get_item.
+        Sid    = "SimJobsRW"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.sim_jobs.arn
+      },
+      {
+        # sim-cache: cache.put after successful simulation (step 6 in handle_job).
+        # GetItem included so the same role could handle cache read if ever needed.
+        Sid    = "SimCacheWrite"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.sim_cache.arn
+      },
+      {
+        # player-params: batch_get_item for 5 players per job.
+        Sid    = "PlayerParamsRead"
+        Effect = "Allow"
+        Action = ["dynamodb:BatchGetItem"]
+        Resource = aws_dynamodb_table.player_params.arn
+      },
+      {
+        # lineup-metrics: get_item for historical lineup defensive rates.
+        # For "hypothetical" lineups this is skipped at runtime, but the role
+        # needs it for any historical lineup lookup.
+        Sid    = "LineupMetricsRead"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem"]
+        Resource = aws_dynamodb_table.lineup_metrics.arn
+      },
+      {
+        Sid    = "XRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+        ]
+        Resource = "*"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_worker" {
+  count      = var.use_local ? 0 : 1
+  role       = aws_iam_role.lambda_worker[0].name
+  policy_arn = aws_iam_policy.lambda_worker[0].arn
+}
+
+resource "aws_lambda_function" "worker" {
+  count         = var.use_local ? 0 : 1
+  function_name = "my5-worker"
+  role          = aws_iam_role.lambda_worker[0].arn
+
+  filename         = local.worker_lambda_zip
+  source_code_hash = filebase64sha256(local.worker_lambda_zip)
+
+  runtime     = "python3.11"
+  handler     = "my5.aws.worker_handler.handler"
+  timeout     = 60
+  memory_size = 256
+
+  environment {
+    variables = {
+      MY5_ENV           = "aws"
+      MY5_SQS_QUEUE_URL = aws_sqs_queue.job_queue[0].url
+      MY5_SQS_DLQ_URL   = aws_sqs_queue.job_dlq[0].url
+    }
+  }
+
+  tracing_config {
+    mode = "Active"
+  }
+}
+
+# SQS → Worker event source mapping.
+# batch_size=1: one job per Lambda invocation — clean error isolation and
+# correct retry semantics (SQS retries the single failed job, not a batch).
+resource "aws_lambda_event_source_mapping" "worker_sqs" {
+  count            = var.use_local ? 0 : 1
+  event_source_arn = aws_sqs_queue.job_queue[0].arn
+  function_name    = aws_lambda_function.worker[0].arn
+  batch_size       = 1
+}
+
+# ── DLQ Lambda (marks jobs failed after 3 delivery attempts) ─────────────────
+#
+# Triggered by my5-jobs-dlq. Calls job_store.fail_job — no simulation logic.
+# Uses the same worker ZIP (both handlers live in my5/aws/).
+# Cost: $0 idle. Only invoked on dead-lettered jobs (rare in normal operation).
+
+resource "aws_iam_role" "lambda_dlq" {
+  count = var.use_local ? 0 : 1
+  name  = "my5-lambda-dlq-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "lambda_dlq" {
+  count = var.use_local ? 0 : 1
+  name  = "my5-lambda-dlq-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "Logs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Sid    = "DLQConsume"
+        Effect = "Allow"
+        Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Resource = aws_sqs_queue.job_dlq[0].arn
+      },
+      {
+        # fail_job calls update_item on my5-sim-jobs.
+        Sid    = "SimJobsFail"
+        Effect = "Allow"
+        Action = ["dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.sim_jobs.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_dlq" {
+  count      = var.use_local ? 0 : 1
+  role       = aws_iam_role.lambda_dlq[0].name
+  policy_arn = aws_iam_policy.lambda_dlq[0].arn
+}
+
+resource "aws_lambda_function" "dlq_worker" {
+  count         = var.use_local ? 0 : 1
+  function_name = "my5-worker-dlq"
+  role          = aws_iam_role.lambda_dlq[0].arn
+
+  filename         = local.worker_lambda_zip
+  source_code_hash = filebase64sha256(local.worker_lambda_zip)
+
+  runtime     = "python3.11"
+  handler     = "my5.aws.dlq_handler.handler"
+  timeout     = 30
+  memory_size = 128
+
+  environment {
+    variables = {
+      MY5_ENV         = "aws"
+      MY5_SQS_DLQ_URL = aws_sqs_queue.job_dlq[0].url
+    }
+  }
+}
+
+resource "aws_lambda_event_source_mapping" "dlq_sqs" {
+  count            = var.use_local ? 0 : 1
+  event_source_arn = aws_sqs_queue.job_dlq[0].arn
+  function_name    = aws_lambda_function.dlq_worker[0].arn
+  batch_size       = 10
+}
+
+# ── FastAPI Lambda + API Gateway HTTP API ─────────────────────────────────────
+#
+# Public HTTP API: GET /api/players, POST /api/simulate, GET /api/jobs/{job_id}.
+# Mangum (handler = Mangum(app) in api/main.py) wraps the FastAPI ASGI app.
+#
+# Cold start: _load_player_cache() scans my5-player-params once (~400 rows,
+# ~500ms). The idempotency check in _lifespan ensures this only happens on
+# the first invocation per container — warm invocations skip it.
+#
+# API Gateway HTTP API (not REST API): lower latency, simpler routing.
+# $1/million requests; first 300M/month free (12-month AWS free tier).
+# Cost: $0 when idle (no requests = no charge). No always-on compute.
+
+resource "aws_iam_role" "lambda_api" {
+  count = var.use_local ? 0 : 1
+  name  = "my5-lambda-api-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "lambda_api" {
+  count = var.use_local ? 0 : 1
+  name  = "my5-lambda-api-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "Logs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        # _load_player_cache() does a full Scan at cold start (~400 rows, ~50KB).
+        Sid    = "PlayerParamsScan"
+        Effect = "Allow"
+        Action = ["dynamodb:Scan"]
+        Resource = aws_dynamodb_table.player_params.arn
+      },
+      {
+        # GET /api/jobs/{id} → get_item; POST /api/simulate → put_item (create_job).
+        Sid    = "SimJobsRW"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = aws_dynamodb_table.sim_jobs.arn
+      },
+      {
+        # Cache hit check in submit_job (before enqueuing the miss).
+        Sid    = "SimCacheRead"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem"]
+        Resource = aws_dynamodb_table.sim_cache.arn
+      },
+      {
+        # submit_job enqueues to my5-jobs on a cache miss.
+        Sid    = "SQSSend"
+        Effect = "Allow"
+        Action = ["sqs:SendMessage"]
+        Resource = aws_sqs_queue.job_queue[0].arn
+      },
+      {
+        Sid    = "XRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+        ]
+        Resource = "*"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_api" {
+  count      = var.use_local ? 0 : 1
+  role       = aws_iam_role.lambda_api[0].name
+  policy_arn = aws_iam_policy.lambda_api[0].arn
+}
+
+resource "aws_lambda_function" "api" {
+  count         = var.use_local ? 0 : 1
+  function_name = "my5-api"
+  role          = aws_iam_role.lambda_api[0].arn
+
+  filename         = local.api_lambda_zip
+  source_code_hash = filebase64sha256(local.api_lambda_zip)
+
+  runtime     = "python3.11"
+  handler     = "api.main.handler"
+  timeout     = 30
+  memory_size = 256  # Cold-start DynamoDB scan + FastAPI init; 256MB for speed.
+
+  environment {
+    variables = {
+      MY5_ENV           = "aws"
+      MY5_SQS_QUEUE_URL = aws_sqs_queue.job_queue[0].url
+      # CORS: allow all origins (permissive default — tighten after Vercel deploy).
+      # FastAPI CORSMiddleware reads this env var via api/config.py.
+      CORS_ORIGINS      = "*"
+    }
+  }
+
+  tracing_config {
+    mode = "Active"
+  }
+}
+
+# API Gateway HTTP API — public HTTPS endpoint for the FastAPI layer.
+# Uses the $default route (catch-all) so Mangum routes internally by path.
+# No CORS configuration here — FastAPI's CORSMiddleware handles CORS in-process,
+# preventing duplicate Access-Control-Allow-Origin headers.
+resource "aws_apigatewayv2_api" "http" {
+  count         = var.use_local ? 0 : 1
+  name          = "my5-http"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "api" {
+  count                  = var.use_local ? 0 : 1
+  api_id                 = aws_apigatewayv2_api.http[0].id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.api[0].invoke_arn
+  payload_format_version = "2.0"  # Required for Mangum with HTTP API.
+}
+
+# $default catch-all route: all methods and paths → Lambda.
+# Mangum routes to the correct FastAPI handler internally.
+resource "aws_apigatewayv2_route" "api_default" {
+  count     = var.use_local ? 0 : 1
+  api_id    = aws_apigatewayv2_api.http[0].id
+  route_key = "$default"
+  target    = "integrations/${aws_apigatewayv2_integration.api[0].id}"
+}
+
+# $default stage with auto-deploy: no manual deploy step required.
+# Invoke URL: https://{id}.execute-api.us-east-1.amazonaws.com (no stage prefix).
+resource "aws_apigatewayv2_stage" "http" {
+  count       = var.use_local ? 0 : 1
+  api_id      = aws_apigatewayv2_api.http[0].id
+  name        = "$default"
+  auto_deploy = true
+}
+
+resource "aws_lambda_permission" "apigw_http" {
+  count         = var.use_local ? 0 : 1
+  statement_id  = "AllowHTTPAPIInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api[0].function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http[0].execution_arn}/*"
+}
+
+# ── New outputs ───────────────────────────────────────────────────────────────
+
+output "http_api_url" {
+  description = "Public HTTP API base URL — set as NEXT_PUBLIC_API_URL in Vercel"
+  value       = var.use_local ? "" : aws_apigatewayv2_stage.http[0].invoke_url
+}
+
+output "worker_lambda_name" {
+  description = "Simulation worker Lambda function name"
+  value       = var.use_local ? "" : aws_lambda_function.worker[0].function_name
+}
+
+output "api_lambda_name" {
+  description = "FastAPI Lambda function name"
+  value       = var.use_local ? "" : aws_lambda_function.api[0].function_name
+}

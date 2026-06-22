@@ -1,5 +1,5 @@
 import type { FC } from "react";
-import { IconPlay, IconSpinner } from "../Icons";
+import { IconBasketball, IconPlay, IconSpinner } from "../Icons";
 
 interface Props {
   canSimulate: boolean;
@@ -26,6 +26,9 @@ const SimulateHub: FC<Props> = ({ canSimulate, phase, onSimulate }) => {
       <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px h-10 bg-gradient-to-t from-transparent to-outline-variant/40" />
 
       <div className="flex flex-col items-center gap-5 z-10">
+        {/* Basketball mark — generic SVG, not an NBA/league trademark */}
+        <IconBasketball size={44} className="text-outline/30" />
+
         {/* Status badge */}
         <div className="flex items-center gap-2 bg-surface-container-highest px-3 py-1.5 border border-outline-variant/60">
           <span

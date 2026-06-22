@@ -134,10 +134,18 @@ _sim_cache: SimCache | None = None
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     global _job_store, _queue_client, _sim_cache
-    _load_player_cache()
-    _job_store = JobStore()
-    _queue_client = QueueClient()
-    _sim_cache = SimCache()
+    # Guards against re-initialization on warm Lambda containers.
+    # Mangum 0.17+ re-runs lifespan events on every Lambda invocation;
+    # module-level globals persist across warm invocations, so these
+    # checks ensure the DynamoDB scan and client setup run only once.
+    if not _player_cache:
+        _load_player_cache()
+    if _job_store is None:
+        _job_store = JobStore()
+    if _queue_client is None:
+        _queue_client = QueueClient()
+    if _sim_cache is None:
+        _sim_cache = SimCache()
     yield
     # Nothing to clean up — boto3 clients have no close().
 

@@ -1,5 +1,5 @@
 import type { FC, ReactElement } from "react";
-import { IconFlask, IconHistory, IconInfo } from "./Icons";
+import { IconFlask, IconGitHub, IconHistory, IconInfo, IconLinkedIn } from "./Icons";
 
 export type NavView = "sandbox" | "history" | "about";
 
@@ -61,6 +61,33 @@ const SideNav: FC<Props> = ({ activeView, onNav }) => (
         );
       })}
     </ul>
+
+    {/* Attribution — designer's signature, bottom-left */}
+    <div className="mt-auto px-3 pt-5 border-t border-outline-variant/20">
+      <p className="text-[10px] font-mono text-on-surface-variant/35 uppercase tracking-wider mb-3">
+        Built by Jake Park
+      </p>
+      <div className="flex items-center gap-4">
+        <a
+          href="https://github.com/jakeparkbuilds/My5"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="GitHub"
+          className="text-on-surface-variant/25 hover:text-on-surface-variant/60 transition-colors"
+        >
+          <IconGitHub size={14} />
+        </a>
+        <a
+          href="https://linkedin.com/in/jkeprk"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="LinkedIn"
+          className="text-on-surface-variant/25 hover:text-on-surface-variant/60 transition-colors"
+        >
+          <IconLinkedIn size={14} />
+        </a>
+      </div>
+    </div>
   </nav>
 );
 
