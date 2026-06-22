@@ -1,0 +1,133 @@
+/* Material Symbols: range axes so FILL/wght variation works */
+@import url("https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+/* ── Design System: Synthetic Court Logic 2.0 ──────────────────────────────── */
+@theme {
+  /* Colors */
+  --color-obsidian-base:              #020617;
+  --color-charcoal-surface:           #0f172a;
+  --color-background:                 #020617;
+  --color-surface:                    #0c1324;
+  --color-surface-dim:                #0c1324;
+  --color-surface-bright:             #33394c;
+  --color-surface-variant:            #2e3447;
+  --color-surface-container-lowest:   #070d1f;
+  --color-surface-container-low:      #151b2d;
+  --color-surface-container:          #191f31;
+  --color-surface-container-high:     #23293c;
+  --color-surface-container-highest:  #2e3447;
+  --color-on-surface:                 #dce1fb;
+  --color-on-surface-variant:         #bcc9cd;
+  --color-outline:                    #869397;
+  --color-outline-variant:            #3d494c;
+  --color-primary:                    #4cd7f6;
+  --color-on-primary:                 #003640;
+  --color-primary-container:          #06b6d4;
+  --color-primary-fixed-dim:          #4cd7f6;
+  --color-electric-cyan:              #06b6d4;
+  --color-secondary:                  #a4d64c;
+  --color-neon-volt:                  #bef264;
+  --color-tertiary:                   #ffb873;
+  --color-error:                      #ffb4ab;
+  --color-data-gray:                  #94a3b8;
+  --color-team-a:                     #4cd7f6;
+  --color-team-b:                     #ffb873;
+
+  /* Fonts */
+  --font-sans: 'Hanken Grotesk', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+html, body {
+  font-family: var(--font-sans);
+  background-color: var(--color-obsidian-base);
+  color: var(--color-on-surface);
+  -webkit-font-smoothing: antialiased;
+  height: 100%;
+}
+
+/* Design system is sharp (0px radius) everywhere */
+*, *::before, *::after {
+  border-radius: 0 !important;
+}
+.rounded-full {
+  border-radius: 9999px !important;
+}
+
+/* ── Blueprint grid background ─────────────────────────────────────────────── */
+.bg-blueprint {
+  background-color: var(--color-obsidian-base);
+  background-image:
+    linear-gradient(rgba(134, 147, 151, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(134, 147, 151, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ── Material Symbols ───────────────────────────────────────────────────────── */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  display: inline-block;
+  white-space: nowrap;
+  letter-spacing: normal;
+  text-transform: none;
+  user-select: none;
+  vertical-align: middle;
+  /* allow variable font axes */
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* ── Glow helpers ───────────────────────────────────────────────────────────── */
+.glow-primary   { box-shadow: 0 0 15px rgba(76, 215, 246, 0.15); }
+.glow-team-b    { box-shadow: 0 0 10px rgba(255, 184, 115, 0.25); }
+.text-glow-cyan { filter: drop-shadow(0 0 12px rgba(76, 215, 246, 0.6)); }
+
+/* Simulate button: active state glow */
+.glow-simulate {
+  box-shadow: 0 0 0 1px rgba(76, 215, 246, 0.5), 0 0 24px rgba(76, 215, 246, 0.2);
+}
+.glow-simulate:hover {
+  box-shadow: 0 0 0 1px rgba(76, 215, 246, 0.85), 0 0 36px rgba(76, 215, 246, 0.35);
+}
+
+/* ── Player card glow on hover ──────────────────────────────────────────────── */
+.player-card-a:hover {
+  box-shadow: 0 0 0 1px #4cd7f6, 0 0 12px rgba(76, 215, 246, 0.15);
+  border-color: #4cd7f6 !important;
+}
+.player-card-b:hover {
+  box-shadow: 0 0 0 1px #ffb873, 0 0 12px rgba(255, 184, 115, 0.15);
+  border-color: #ffb873 !important;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3d494c; }
+::-webkit-scrollbar-thumb:hover { background: #869397; }
+
+/* ── Animations ─────────────────────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%   { opacity: 1; box-shadow: 0 0 0 0 rgba(76, 215, 246, 0.7); }
+  70%  { opacity: 0.5; box-shadow: 0 0 0 6px rgba(76, 215, 246, 0); }
+  100% { opacity: 1; box-shadow: 0 0 0 0 rgba(76, 215, 246, 0); }
+}
+.animate-pulse-dot { animation: pulse-dot 2s infinite; }
+
+@keyframes wobble {
+  from { transform: translateY(-1px); }
+  to   { transform: translateY(1px); }
+}
+.animate-wobble { animation: wobble 0.5s ease-in-out infinite alternate; }
+
+@keyframes scroll-up {
+  0%   { transform: translateY(0); }
+  100% { transform: translateY(-50%); }
+}
+.animate-scroll-up { animation: scroll-up 14s linear infinite; }

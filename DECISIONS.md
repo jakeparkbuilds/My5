@@ -736,3 +736,54 @@ Raw throughput without p99 is misleading — a system can maximize throughput by
 
 **DLQ depth measured at end of run.**
 A non-zero DLQ count after a load test means one or more jobs exceeded `maxReceiveCount=3` — structural failures, not random noise. The load test reads `ApproximateNumberOfMessages` from the DLQ and prints it. On local (ElasticMQ), this is skipped (returns 0).
+
+---
+
+## 2026-06-20 — Frontend: player search — client-side filtering over a single prefetch
+
+**Choice:** `GET /api/players` returns the full player list (405 players) once. The client caches it in memory (`let _playerCache`). Every keystroke in the picker modal filters this in-memory list. Zero per-query DynamoDB calls after startup.
+
+**Alternatives considered:**
+- Per-query DynamoDB scan: ruled out immediately — scanning on every keystroke is expensive, slow, and wasteful. The table is 405 rows and rarely changes.
+- DynamoDB GSI on name: would allow server-side prefix filtering, but adds infra complexity and a GSI cost for zero gain at our data size.
+- Static JSON bundled in the frontend: slightly simpler but loses the simulation params (usage_rate, fg_pct) which the player card displays. The API merge with DynamoDB data is needed.
+
+**Why this is fine at our data size:** 405 players × ~300 bytes each = ~120 KB JSON. Loads once, instant filtering. If the player pool grew to 5,000+ players, the right move is a DynamoDB GSI with `begins_with` filtering — the server-side `GET /api/players?q=` contract is already in place for that upgrade.
+
+---
+
+## 2026-06-20 — Frontend: no-hardcode URL discipline
+
+**Choice:** All URLs (API base URL, WebSocket wss:// URL) come from `NEXT_PUBLIC_API_URL` / `NEXT_PUBLIC_WS_URL` env vars in `frontend/.env.local`. Backend CORS origins come from `CORS_ORIGINS` env var. Nothing is hardcoded in source.
+
+**Why this matters:** The same frontend build deploys to any environment (local, staging, prod) by swapping `.env.local`. The same discipline as `MY5_ENV` / `MY5_SQS_QUEUE_URL` on the backend — one config change, everything follows.
+
+---
+
+## 2026-06-20 — Frontend HTTP layer: FastAPI + Mangum (not a new Lambda handler)
+
+**Choice:** FastAPI wraps the existing `submit_job()`, `JobStore`, and `SimCache` Python functions directly. Mangum adapts the ASGI app to Lambda's event format in one line. Locally: `uvicorn api.main:app --reload`.
+
+**Why FastAPI over a raw Lambda handler:** The existing backend already has correct, tested logic. FastAPI adds only HTTP routing and Pydantic schema validation on top — no business logic rewritten, no new DynamoDB access patterns, no risk of divergence. A raw Lambda handler would duplicate the Pydantic models and routing logic.
+
+**Why Mangum:** Lambda can't run an ASGI server natively. Mangum translates API Gateway HTTP events → ASGI scope → FastAPI handles it → Mangum translates the response back. Zero code change between local (`uvicorn`) and Lambda (`Mangum(app)`) — the same `app` object is used in both.
+
+**Deploy cost:** Lambda + API Gateway HTTP API = $0 idle (scale-to-zero), ~$0.001 per 1,000 requests. No always-on servers.
+
+---
+
+## 2026-06-20 — Frontend: always "hypothetical" lineup key for submissions
+
+**Choice:** `POST /api/simulate` always passes `team_a_key="hypothetical"` and `team_b_key="hypothetical"` to `submit_job()`. Historical lineup defensive metrics are never looked up.
+
+**Why:** The sandbox is explicitly for cross-team, cross-era, hypothetical matchups — the whole point is picking Curry + LeBron or any five players from different teams. Computing a real lineup_key requires all 5 players to share a team_id AND have played together in our 52-game dataset. In the general case neither holds. "Hypothetical" triggers the shrinkage fallback to league-average defense (n=0 weight on historical defensive data), which is the correct and honest behavior. The result screen surfaces this as a disclaimer.
+
+**Interview note:** This is an honest trade-off, not a bug. The simulator's shrinkage design was specifically built for this case — defense is modeled at the lineup level, and when no historical data exists, the prior is league average. A future enhancement would let users pick a real historical lineup to get their actual defensive profile.
+
+---
+
+## 2026-06-20 — Frontend: WebSocket as display layer, job record as truth
+
+**Choice:** The WebSocket receives progress frames for display only. On disconnect/error, the frontend immediately polls `GET /api/jobs/{job_id}` as the source of truth. A 60-second timeout also polls the job record. It never trusts the socket alone.
+
+**Why:** WebSockets can drop for many reasons (Lambda cold start, network blip, browser tab background throttling). The job record in DynamoDB is durable — it always reflects the actual job state. Treating the socket as the store would cause the UI to show "simulating" forever after a drop. The resilience pattern is: socket is fast UX; record is truth; reconcile on every disconnect.
