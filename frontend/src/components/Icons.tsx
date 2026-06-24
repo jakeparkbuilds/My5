@@ -159,30 +159,6 @@ export const IconError: FC<IconProps> = ({ size = 18, className }) => (
   </Base>
 );
 
-// Generic basketball — circle + horizontal equator + two symmetric curved seams.
-// Uses round caps/joins so the seam arcs look natural. Not an NBA mark.
-export const IconBasketball: FC<IconProps> = ({ size = 24, className }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth={1.5}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden="true"
-  >
-    <circle cx="12" cy="12" r="10" />
-    <line x1="2" y1="12" x2="22" y2="12" />
-    {/* right seam arc */}
-    <path d="M12 2 C18 5 18 19 12 22" />
-    {/* left seam arc */}
-    <path d="M12 2 C6 5 6 19 12 22" />
-  </svg>
-);
-
 // GitHub mark — simplified fill path, standard developer attribution use.
 // TODO: verify this is acceptable for your portfolio context.
 export const IconGitHub: FC<IconProps> = ({ size = 18, className }) => (

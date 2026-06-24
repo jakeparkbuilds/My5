@@ -1,5 +1,5 @@
 import type { FC } from "react";
-import { IconBasketball, IconPlay, IconSpinner } from "../Icons";
+import { IconPlay, IconSpinner } from "../Icons";
 
 interface Props {
   canSimulate: boolean;
@@ -20,14 +20,16 @@ const SimulateHub: FC<Props> = ({ canSimulate, phase, onSimulate }) => {
   const isReady = canSimulate && !isSubmitting;
 
   return (
-    <section className="lg:col-span-4 flex flex-col justify-center relative px-4 py-6 border-x border-outline-variant/20">
+    <section className="lg:col-span-4 flex flex-col justify-center relative px-4 py-3 border-x border-outline-variant/20">
       {/* Decorative vertical lines */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-px h-10 bg-gradient-to-b from-transparent to-outline-variant/40" />
       <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-px h-10 bg-gradient-to-t from-transparent to-outline-variant/40" />
 
-      <div className="flex flex-col items-center gap-5 z-10">
-        {/* Basketball mark — generic SVG, not an NBA/league trademark */}
-        <IconBasketball size={44} className="text-outline/30" />
+      <div className="flex flex-col items-center gap-3 z-10">
+        {/* M5 monogram mark */}
+        <div className="w-11 h-11 border border-primary/40 flex items-center justify-center">
+          <span className="text-[15px] font-black font-mono tracking-tighter text-primary/50 select-none">M5</span>
+        </div>
 
         {/* Status badge */}
         <div className="flex items-center gap-2 bg-surface-container-highest px-3 py-1.5 border border-outline-variant/60">
